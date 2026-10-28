@@ -1,0 +1,13 @@
+.git
+.gitignore
+.github
+bin
+web/node_modules
+web/dist
+internal/webui/public/assets
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+docs
+deploy

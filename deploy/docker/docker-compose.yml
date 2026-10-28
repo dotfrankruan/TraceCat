@@ -1,0 +1,34 @@
+# Controller-only compose example. The dashboard is intended to sit behind
+# Cloudflare Tunnel + Cloudflare Access (or a tailnet-only listener).
+#
+#   docker compose -f deploy/docker/docker-compose.yml up -d --build
+#
+# Create the host directories first and let the nonroot container user own the
+# database volume:
+#   sudo install -d -m 0700 -o 65532 -g 65532 /var/lib/tracecat
+#   sudo install -d -m 0755 /etc/tracecat
+#   sudo install -m 0640 -o root -g 65532 configs/controller.example.json /etc/tracecat/controller.json
+#   sudo install -m 0600 deploy/systemd/tracecat-controller.env.example /etc/tracecat/controller.env
+services:
+  controller:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.controller
+    image: tracecat-controller:local
+    restart: unless-stopped
+    read_only: true
+    user: "65532:65532"
+    network_mode: host # binds the configured loopback/Tailscale address only
+    environment:
+      - TRACECAT_CONTROLLER_PASSWORD_HASH=${TRACECAT_CONTROLLER_PASSWORD_HASH:-}
+    volumes:
+      - /etc/tracecat/controller.json:/etc/tracecat/controller.json:ro
+      - /var/lib/tracecat:/var/lib/tracecat
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 512m

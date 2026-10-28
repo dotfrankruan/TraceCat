@@ -1,0 +1,19 @@
+# Cloudflare Tunnel example for the TraceCat Controller.
+# Install as /etc/cloudflared/config.yml (see docs/DEPLOYMENT.md).
+#
+# The tunnel terminates TLS at Cloudflare and forwards to the Controller's
+# loopback listener. Protect the hostname with a Cloudflare Access application:
+# Cloudflare Access is what authenticates users to the dashboard; TraceCat
+# independently verifies the Access JWT at the origin (auth.mode=cloudflare).
+#
+# Do not expose the Controller port directly to the internet.
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: /etc/cloudflared/REPLACE_WITH_TUNNEL_UUID.json
+
+ingress:
+  - hostname: trace.example.com
+    service: http://127.0.0.1:8080
+    originRequest:
+      connectTimeout: 10s
+      noTLSVerify: false
+  - service: http_status:404

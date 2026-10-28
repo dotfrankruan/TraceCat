@@ -1,0 +1,52 @@
+[Unit]
+Description=TraceCat Controller (distributed traceroute dashboard)
+Documentation=https://github.com/dotfrankruan/TraceCat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tracecat
+Group=tracecat
+ExecStart=/usr/local/bin/tracecat-controller -config /etc/tracecat/controller.json
+# Secrets (local password hash, optional service-token metadata) live here, mode 0600 root:tracecat.
+EnvironmentFile=-/etc/tracecat/controller.env
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+
+# State directory: /var/lib/tracecat (SQLite database). Created automatically.
+StateDirectory=tracecat
+StateDirectoryMode=0700
+UMask=0077
+
+# Hardening. The Controller needs no capabilities and no writable paths
+# outside its state directory. It listens on loopback behind cloudflared or on
+# a Tailscale address covered by tailnet ACLs.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

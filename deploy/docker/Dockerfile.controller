@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+
+# TraceCat Controller image. The Agent is intentionally NOT containerized in
+# this example: it must bind to the host's Tailscale address and execute the
+# host-installed NextTrace binary, so systemd on the host is recommended
+# (deploy/systemd/tracecat-agent.service).
+#
+# Build from the repository root:
+#   docker build -f deploy/docker/Dockerfile.controller -t tracecat-controller .
+
+FROM node:22-alpine AS ui
+WORKDIR /src
+RUN corepack enable
+COPY web/package.json web/pnpm-lock.yaml* ./
+RUN pnpm install --frozen-lockfile || pnpm install
+COPY web/ ./
+RUN mkdir -p /src/internal/webui/public && pnpm build
+
+FROM golang:1.27-alpine AS build
+RUN apk add --no-cache ca-certificates git
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . ./
+COPY --from=ui /src/internal/webui/public ./internal/webui/public
+RUN CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w -X github.com/dotfrankruan/tracecat/internal/version.Version=docker" \
+      -o /out/tracecat-controller ./cmd/tracecat-controller
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/tracecat-controller /usr/local/bin/tracecat-controller
+USER nonroot:nonroot
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/tracecat-controller"]
+CMD ["-config", "/etc/tracecat/controller.json"]

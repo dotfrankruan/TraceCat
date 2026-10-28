@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go (vet + race tests + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: true
+      - name: gofmt
+        run: |
+          files=$(find . -name '*.go' -not -path './web/*')
+          unformatted=$(gofmt -l $files)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: tests (race detector)
+        run: go test -race -count=1 ./...
+      - name: build binaries
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o /tmp/tracecat-controller ./cmd/tracecat-controller
+          CGO_ENABLED=0 go build -trimpath -o /tmp/tracecat-agent ./cmd/tracecat-agent
+
+  web:
+    name: Dashboard (typecheck + static build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: install
+        run: pnpm --dir web install --frozen-lockfile
+      - name: typecheck
+        run: pnpm --dir web run typecheck
+      - name: build (embedded into the Go binary)
+        run: pnpm --dir web build
+      - name: build Controller with freshly built dashboard
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - run: CGO_ENABLED=0 go build -trimpath -o /tmp/tracecat-controller ./cmd/tracecat-controller

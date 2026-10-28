@@ -1,0 +1,58 @@
+[Unit]
+Description=TraceCat Agent (secure NextTrace runner, Tailscale-only listener)
+Documentation=https://github.com/dotfrankruan/TraceCat
+After=network-online.target tailscaled.service
+Wants=network-online.target
+# Do not start before the tailnet address exists: the Agent refuses to bind a
+# missing address and must never fall back to a wildcard listener.
+Requires=tailscaled.service
+
+[Service]
+Type=simple
+# Dedicated unprivileged service account. Never run the Agent as root.
+User=tracecat
+Group=tracecat
+ExecStart=/usr/local/bin/tracecat-agent -config /etc/tracecat/agent.json
+# Per-Agent bearer token: TRACECAT_AGENT_TOKEN=... (mode 0600, root-owned).
+EnvironmentFile=/etc/tracecat/agent.env
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+
+# NextTrace needs CAP_NET_RAW for ICMP (and TCP/UDP SYN later). Grant it to the
+# Agent process as an *ambient* capability so the unprivileged nexttrace child
+# inherits it without root, setuid, or a setcap binary:
+#   AmbientCapabilities=CAP_NET_RAW
+# Alternative (documented in docs/DEPLOYMENT.md): setcap cap_net_raw+ep on the
+# nexttrace binary and remove the two capability lines below.
+NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+# nexttrace may inspect interfaces via netlink; raw sockets need inet.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+LimitNOFILE=4096
+# Bounded resource usage; the Agent enforces its own concurrency/time limits too.
+MemoryMax=512M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

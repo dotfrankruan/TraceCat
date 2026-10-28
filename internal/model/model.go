@@ -143,6 +143,7 @@ const (
 	ErrForbidden          ErrorCode = "forbidden"
 	ErrTargetRejected     ErrorCode = "target_rejected"
 	ErrAgentUnreachable   ErrorCode = "agent_unreachable"
+	ErrAgentError         ErrorCode = "agent_error"
 	ErrNextTraceMissing   ErrorCode = "nexttrace_unavailable"
 	ErrNextTraceFailed    ErrorCode = "nexttrace_failed"
 	ErrParseError         ErrorCode = "parse_error"

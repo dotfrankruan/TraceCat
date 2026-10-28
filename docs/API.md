@@ -445,6 +445,13 @@ completed), `partial` (mixed outcomes with at least one completed), `failed`
 (none completed), `cancelled`. Node statuses are `pending`, `running`,
 `completed`, `failed`, `timed_out`, `cancelled`.
 
+Per-node `error.code` is a stable normalized code: `agent_unreachable` (network
+failure reaching the Agent), `agent_error` (Agent returned an HTTP error or an
+invalid/oversized contract response), `nexttrace_unavailable`,
+`nexttrace_failed`, `parse_error`, `output_too_large`, `timeout`, `cancelled`
+or `internal`. Error messages never contain stderr, environment values,
+executable paths or stack traces.
+
 Aggregate and per-node retries are never performed silently.
 
 ### 2.9 `GET /api/v1/jobs`

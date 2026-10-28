@@ -1,0 +1,59 @@
+{
+  "listen": "127.0.0.1:8080",
+  "public_origin": "https://tracecat.example.com",
+  "auth": {
+    "mode": "cloudflare",
+    "cloudflare": {
+      "team_domain": "https://example-team.cloudflareaccess.com",
+      "audience": ["REPLACE_WITH_CLOUDFLARE_ACCESS_AUDIENCE_TAG"],
+      "allowed_emails": ["ops@example.com"],
+      "allowed_email_domains": ["example.com"],
+      "jwks_cache_ttl_seconds": 300,
+      "csrf_secret_env": "TRACECAT_CSRF_SECRET"
+    }
+  },
+  "database": {
+    "path": "/var/lib/tracecat/controller.db",
+    "max_history_jobs": 200
+  },
+  "dns": {
+    "timeout_ms": 4000,
+    "max_addresses": 16
+  },
+  "limits": {
+    "max_hops": 30,
+    "max_queries": 3,
+    "min_execution_ms": 5000,
+    "max_execution_ms": 60000,
+    "max_nodes_per_job": 8,
+    "max_jobs_per_minute": 30,
+    "max_concurrent_jobs": 4,
+    "max_concurrent_traces": 4,
+    "max_resolves_per_minute": 120,
+    "max_raw_result_bytes": 1048576
+  },
+  "agents": [
+    {
+      "id": "tokyo-1",
+      "name": "Tokyo",
+      "location": "Tokyo, JP",
+      "provider": "DMIT",
+      "url": "http://100.64.0.10:8443",
+      "token_env": "TRACECAT_AGENT_TOKEN_TOKYO_1",
+      "enabled": true,
+      "request_timeout_ms": 75000
+    },
+    {
+      "id": "frankfurt-1",
+      "name": "Frankfurt",
+      "location": "Frankfurt, DE",
+      "provider": "Hetzner",
+      "url": "http://100.64.0.11:8443",
+      "token_env": "TRACECAT_AGENT_TOKEN_FRANKFURT_1",
+      "enabled": true,
+      "request_timeout_ms": 75000
+    }
+  ],
+  "trusted_proxies": ["127.0.0.1/32", "::1/128"],
+  "log_level": "info"
+}

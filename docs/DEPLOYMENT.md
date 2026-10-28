@@ -77,6 +77,9 @@ is separate; at minimum:
    - `team_domain`: `https://<your-team>.cloudflareaccess.com`
    - `audience`: the Access application's Audience (AUD) tag
    - optionally `allowed_emails` / `allowed_email_domains`
+   - if you set `csrf_secret_env`, put the named secret (>=16 random bytes) in
+     `/etc/tracecat/controller.env`; otherwise a random per-process secret is
+     generated (fine for a single Controller instance)
 4. Set `public_origin` to the public HTTPS URL so cookies are `Secure` and
    Origin/CSRF checks match.
 

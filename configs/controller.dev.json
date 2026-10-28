@@ -1,0 +1,41 @@
+{
+  "listen": "127.0.0.1:8080",
+  "public_origin": "http://127.0.0.1:8080",
+  "auth": {
+    "mode": "dev"
+  },
+  "database": {
+    "path": "./var/controller.db",
+    "max_history_jobs": 200
+  },
+  "dns": {
+    "timeout_ms": 4000,
+    "max_addresses": 16
+  },
+  "limits": {
+    "max_hops": 30,
+    "max_queries": 3,
+    "min_execution_ms": 5000,
+    "max_execution_ms": 60000,
+    "max_nodes_per_job": 8,
+    "max_jobs_per_minute": 30,
+    "max_concurrent_jobs": 4,
+    "max_concurrent_traces": 4,
+    "max_resolves_per_minute": 120,
+    "max_raw_result_bytes": 1048576
+  },
+  "agents": [
+    {
+      "id": "local-1",
+      "name": "Local development",
+      "location": "localhost",
+      "provider": "dev",
+      "url": "http://127.0.0.1:9481",
+      "token_env": "TRACECAT_AGENT_TOKEN",
+      "enabled": true,
+      "request_timeout_ms": 75000
+    }
+  ],
+  "trusted_proxies": [],
+  "log_level": "debug"
+}

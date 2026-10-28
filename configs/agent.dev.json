@@ -1,0 +1,29 @@
+{
+  "node_id": "dev-local",
+  "name": "Local development",
+  "listen": "127.0.0.1:9481",
+  "auth": {
+    "token_env": "TRACECAT_AGENT_TOKEN"
+  },
+  "nexttrace": {
+    "binary": "/usr/local/bin/nexttrace",
+    "max_concurrent_traces": 4,
+    "probe_timeout_ms": 1000,
+    "max_execution_ms": 60000,
+    "max_stdout_bytes": 4194304,
+    "max_raw_bytes": 1048576,
+    "geo_provider": ""
+  },
+  "security": {
+    "allow_private_targets": false,
+    "allowed_cidrs": [],
+    "require_tailscale_bind": false,
+    "allow_non_tailscale_bind": true
+  },
+  "rate_limit": {
+    "requests_per_minute": 120,
+    "burst": 20,
+    "max_concurrent_http": 16
+  },
+  "log_level": "debug"
+}

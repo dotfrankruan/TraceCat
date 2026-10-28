@@ -19,6 +19,7 @@ import type {
   Job,
   JobListItem,
   NodeInfo,
+  Protocol,
   Session,
 } from './api/types'
 import { AgentPanel } from './components/AgentPanel'
@@ -40,6 +41,14 @@ import {
   preferReducedMotion,
   shortId,
 } from './lib/format'
+import {
+  DEFAULT_PORTS,
+  normalizeProtocols,
+  parsePortInput,
+  probeLabel,
+  protocolRequiresPort,
+  validatePortInput,
+} from './lib/protocols'
 import { isTerminalJob, jobStatusMeta } from './lib/status'
 import type { ResolveState, ToastItem, ToastKind, ViewMode } from './types'
 
@@ -72,6 +81,11 @@ export function App() {
   const [maxHops, setMaxHops] = useState(DEFAULT_MAX_HOPS)
   const [queries, setQueries] = useState(DEFAULT_QUERIES)
   const [timeoutMs, setTimeoutMs] = useState(DEFAULT_TIMEOUT_MS)
+  const [protocol, setProtocol] = useState<Protocol>('icmp')
+  const [portInputs, setPortInputs] = useState<Record<'tcp' | 'udp', string>>({
+    tcp: String(DEFAULT_PORTS.tcp),
+    udp: String(DEFAULT_PORTS.udp),
+  })
 
   const [job, setJob] = useState<Job | null>(null)
   const [jobLoading, setJobLoading] = useState(false)
@@ -97,6 +111,7 @@ export function App() {
   const maxNodesPerJob = Math.max(1, limits?.max_nodes_per_job ?? 8)
   const maxHistoryJobs = Math.max(1, limits?.max_history_jobs ?? 200)
   const historyLimit = Math.min(HISTORY_PAGE_LIMIT, maxHistoryJobs, 100)
+  const availableProtocols = useMemo(() => normalizeProtocols(limits?.protocols), [limits])
 
   const pushToast = useCallback((kind: ToastKind, text: string) => {
     toastSeq.current += 1
@@ -221,6 +236,12 @@ export function App() {
     )
   }, [session])
 
+  useEffect(() => {
+    setProtocol((previous) =>
+      availableProtocols.includes(previous) ? previous : (availableProtocols[0] ?? 'icmp'),
+    )
+  }, [availableProtocols])
+
   const handleLogin = useCallback(
     async (password: string) => {
       setLoginBusy(true)
@@ -302,6 +323,23 @@ export function App() {
     setSelectedNodeIds([])
   }, [])
 
+  const handleProtocolChange = useCallback((next: Protocol) => {
+    setProtocol(next)
+  }, [])
+
+  const handlePortInputChange = useCallback(
+    (value: string) => {
+      if (protocol !== 'tcp' && protocol !== 'udp') return
+      setPortInputs((previous) => ({ ...previous, [protocol]: value }))
+    },
+    [protocol],
+  )
+
+  const requiresPort = protocolRequiresPort(protocol)
+  const activePortInput = protocol === 'tcp' || protocol === 'udp' ? portInputs[protocol] : ''
+  const portError = requiresPort ? validatePortInput(activePortInput) : null
+  const destinationPort = requiresPort && portError === null ? parsePortInput(activePortInput) : null
+
   const startBlockReason = useMemo(() => {
     if (!session) return 'Session unavailable.'
     if (job && !isTerminalJob(job.status)) {
@@ -313,6 +351,11 @@ export function App() {
     if (selectedNodeIds.length > maxNodesPerJob) {
       return `Select at most ${maxNodesPerJob} agents per job.`
     }
+    if (!availableProtocols.includes(protocol)) {
+      return 'The selected probe protocol is not enabled by the controller.'
+    }
+    if (requiresPort && portError) return portError
+    if (requiresPort && destinationPort == null) return 'Enter a destination port between 1 and 65535.'
     if (maxHops < 1 || maxHops > session.limits.max_hops) {
       return `Max hops must be between 1 and ${session.limits.max_hops}.`
     }
@@ -320,7 +363,21 @@ export function App() {
       return `Queries must be between 1 and ${session.limits.max_queries}.`
     }
     return null
-  }, [session, job, resolveState, selectedIP, selectedNodeIds, maxNodesPerJob, maxHops, queries])
+  }, [
+    session,
+    job,
+    resolveState,
+    selectedIP,
+    selectedNodeIds,
+    maxNodesPerJob,
+    availableProtocols,
+    protocol,
+    requiresPort,
+    portError,
+    destinationPort,
+    maxHops,
+    queries,
+  ])
 
   const handleStart = useCallback(async () => {
     if (startBlockReason !== null || !selectedIP || resolveState.status !== 'success') return
@@ -330,17 +387,22 @@ export function App() {
         target_ip: selectedIP,
         original_target: resolveState.data.input || targetInput.trim(),
         node_ids: selectedNodeIds,
-        protocol: 'icmp',
+        protocol,
         max_hops: maxHops,
         queries,
         timeout_ms: timeoutMs,
       }
+      // ICMP must omit the port field entirely; TCP/UDP require it.
+      if (requiresPort && destinationPort != null) request.port = destinationPort
       const response = await createJob(request)
       setJob(response.job)
       setJobFromHistory(false)
       setView('detailed')
       setHighlight(null)
-      pushToast('info', `Trace started on ${response.job.nodes.length} agent(s).`)
+      pushToast(
+        'info',
+        `Trace started on ${response.job.nodes.length} agent(s) · ${probeLabel(protocol, destinationPort)}.`,
+      )
       if (window.matchMedia('(max-width: 1023px)').matches) {
         window.setTimeout(() => {
           resultsRef.current?.scrollIntoView({
@@ -376,6 +438,9 @@ export function App() {
     startBlockReason,
     targetInput,
     timeoutMs,
+    protocol,
+    requiresPort,
+    destinationPort,
   ])
 
   const refreshJob = useCallback(
@@ -623,6 +688,12 @@ export function App() {
 
             <RunPanel
               limits={activeSession.limits}
+              protocols={availableProtocols}
+              protocol={protocol}
+              onProtocolChange={handleProtocolChange}
+              portInput={activePortInput}
+              portError={portError}
+              onPortInputChange={handlePortInputChange}
               maxHops={maxHops}
               queries={queries}
               timeoutMs={timeoutMs}
@@ -679,7 +750,8 @@ export function App() {
                       </h2>
                       <p className="mt-1 max-w-prose text-[12px] leading-relaxed text-muted">
                         Resolve a target, pick the exact numeric destination, and select agents.
-                        Each agent runs one one-shot ICMP trace and returns its full hop table.
+                        Each agent runs one one-shot ICMP/TCP/UDP trace and returns its full hop
+                        table.
                       </p>
                       <ol className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
                         {[
@@ -700,7 +772,7 @@ export function App() {
                         ))}
                       </ol>
                       <p className="mt-3 border-t border-line/70 pt-2 font-mono text-[10px] text-dim">
-                        ICMP only · no hop-by-hop live streaming · no silent retries
+                        ICMP · TCP · UDP · no hop-by-hop live streaming · no silent retries
                       </p>
                     </div>
                   </div>
@@ -754,12 +826,30 @@ export function App() {
                   <CopyButton value={selectedIP} label="Copy selected destination" text="copy ip" />
                 </div>
                 <p className="mt-1 break-all font-mono text-[12px] text-accent">{selectedIP}</p>
-                <p className="mt-0.5 text-[10px] leading-snug text-muted">
-                  {selectedNodeIds.length} agent{selectedNodeIds.length === 1 ? '' : 's'} ·{' '}
-                  {maxHops} hops · {queries}× probes · {formatSeconds(timeoutMs)}
+                <p className="mt-1 flex flex-wrap items-baseline gap-x-1.5 text-[10px] text-muted">
+                  <span className="badge badge-square border-accent/35 bg-accent/10 text-accent">
+                    {probeLabel(protocol, destinationPort)}
+                  </span>
+                  <span>
+                    {selectedNodeIds.length} agent{selectedNodeIds.length === 1 ? '' : 's'}
+                  </span>
+                  <span aria-hidden="true" className="text-dim">
+                    ·
+                  </span>
+                  <span>{maxHops} hops</span>
+                  <span aria-hidden="true" className="text-dim">
+                    ·
+                  </span>
+                  <span>{queries}× probes</span>
+                  <span aria-hidden="true" className="text-dim">
+                    ·
+                  </span>
+                  <span>{formatSeconds(timeoutMs)}</span>
                 </p>
                 <p className="mt-1 font-mono text-[9px] text-dim">
-                  agents probe only this numeric destination
+                  {requiresPort
+                    ? `agents probe ${protocol} destination port ${destinationPort ?? '—'} on this IP`
+                    : 'agents send ICMP echo probes to only this numeric destination'}
                 </p>
               </section>
             ) : null}

@@ -43,6 +43,9 @@ with `make dev-controller` first. The dashboard has no router: all state lives a
   controller CSP (`self` only, no inline scripts) is satisfied.
 - `dangerouslySetInnerHTML` is never used; all controller/agent metadata is rendered
   as text.
+- Probe protocols come from `session.limits.protocols` (icmp/tcp/udp). TCP/UDP
+  require a validated integer destination port (1–65535, defaults 80/TCP and
+  33494/UDP, preserved per protocol); ICMP omits the port field entirely.
 - The CSRF token returned by `GET /api/v1/session` is kept in module memory only
   (`src/api/client.ts`) and sent as `X-TraceCat-CSRF` on every POST.
 - Live updates use the controller SSE stream as state-change notifications (full

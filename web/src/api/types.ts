@@ -8,7 +8,8 @@
  */
 
 export type IPFamily = 'ipv4' | 'ipv6'
-export type Protocol = 'icmp'
+/** Fixed probe-protocol enum accepted by the controller and agents. */
+export type Protocol = 'icmp' | 'tcp' | 'udp'
 
 export type NodeStatus =
   | 'pending'
@@ -44,6 +45,11 @@ export interface ControllerLimits {
   max_nodes_per_job: number
   max_addresses: number
   max_history_jobs: number
+  /**
+   * Probe protocols enabled by the controller (docs/API.md §2.3). The client
+   * still normalizes/falls back defensively if an older controller omits it.
+   */
+  protocols: Protocol[]
 }
 
 export interface User {
@@ -108,6 +114,8 @@ export interface CreateJobRequest {
   original_target: string
   node_ids: string[]
   protocol: Protocol
+  /** Required for tcp/udp (integer 1..65535); MUST be omitted for icmp. */
+  port?: number
   max_hops: number
   queries: number
   timeout_ms: number
@@ -187,6 +195,8 @@ export interface Job {
   original_target: string
   family: IPFamily
   protocol: Protocol
+  /** Destination port echoed for tcp/udp jobs; absent for icmp. */
+  port?: number
   max_hops: number
   queries: number
   timeout_ms: number
@@ -205,6 +215,9 @@ export interface JobListItem {
   target_ip: string
   original_target: string
   family: IPFamily
+  protocol: Protocol
+  /** Destination port echoed for tcp/udp jobs; absent for icmp. */
+  port?: number
   created_at: string
   ended_at?: string
   summary: JobSummary

@@ -8,6 +8,7 @@ import {
   type HopView,
 } from '../lib/hops'
 import { formatDurationMs, formatRtt, absoluteTimestamp } from '../lib/format'
+import { probeLabel } from '../lib/protocols'
 import { nodeStatusMeta } from '../lib/status'
 import { AsPath } from './AsPath'
 import { HopTable } from './HopTable'
@@ -74,11 +75,15 @@ function TerminalWithoutHops({ node }: { node: NodeResult }) {
 export function NodeResultCard({
   node,
   targetIP,
+  protocol,
+  port,
   highlightedTtl,
   onJump,
 }: {
   node: NodeResult
   targetIP: string
+  protocol: string
+  port?: number | null
   highlightedTtl: number | null
   onJump: (nodeId: string, ttl: number) => void
 }) {
@@ -121,6 +126,12 @@ export function NodeResultCard({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          <span
+            className="badge badge-square border-line-strong text-muted"
+            title="Probe protocol and destination port"
+          >
+            {probeLabel(protocol, port)}
+          </span>
           <StatusBadge meta={meta} />
           <span
             className="font-mono text-[10px] text-dim"

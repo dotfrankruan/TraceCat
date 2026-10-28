@@ -13,6 +13,7 @@ import {
   type HopView,
 } from '../lib/hops'
 import { formatRtt } from '../lib/format'
+import { probeLabel } from '../lib/protocols'
 import { nodeStatusMeta } from '../lib/status'
 import { ComparePathChips } from './AsPath'
 import { IconAlert, IconNetwork } from './Icons'
@@ -172,7 +173,8 @@ export function CompareView({
               Aligned paths
             </h3>
             <span className="font-mono text-[10px] text-dim">
-              {ttls.length} observed TTL{ttls.length === 1 ? '' : 's'}
+              {probeLabel(job.protocol, job.port)} · {ttls.length} observed TTL
+              {ttls.length === 1 ? '' : 's'}
             </span>
           </header>
           <div className="table-scroll">

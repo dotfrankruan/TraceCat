@@ -10,6 +10,7 @@ import {
   relativeTime,
   shortId,
 } from '../lib/format'
+import { probeLabel } from '../lib/protocols'
 import { isTerminalJob, jobStatusMeta, nodeStatusMeta } from '../lib/status'
 import type { ViewMode } from '../types'
 import { CompareView } from './CompareView'
@@ -121,6 +122,12 @@ export function JobPanel({
                 </span>
               ) : null}
               <LiveBadge mode={liveMode} />
+              <span
+                className="badge badge-square border-accent/35 bg-accent/10 text-accent"
+                title="Probe protocol and destination port"
+              >
+                {probeLabel(job.protocol, job.port)}
+              </span>
             </div>
             <h2
               id="job-heading"
@@ -177,7 +184,11 @@ export function JobPanel({
 
         <div className="grid grid-cols-2 gap-px border-b border-line/60 bg-line/40 sm:grid-cols-4 xl:grid-cols-8">
           <Meta label="Family" value={job.family} />
-          <Meta label="Protocol" value={job.protocol} />
+          <Meta
+            label="Protocol"
+            value={probeLabel(job.protocol, job.port)}
+            title="Probe protocol and destination port (port applies to TCP/UDP only)"
+          />
           <Meta label="Max hops" value={job.max_hops} />
           <Meta label="Queries" value={`${job.queries}×`} />
           <Meta label="Timeout" value={formatSeconds(job.timeout_ms)} />
@@ -323,6 +334,8 @@ export function JobPanel({
               key={node.node_id}
               node={node}
               targetIP={job.target_ip}
+              protocol={job.protocol}
+              port={job.port}
               highlightedTtl={
                 highlight && highlight.nodeId === node.node_id ? highlight.ttl : null
               }

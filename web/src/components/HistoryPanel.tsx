@@ -5,6 +5,7 @@ import {
   formatDateTime,
   relativeTime,
 } from '../lib/format'
+import { probeLabel } from '../lib/protocols'
 import { jobStatusMeta } from '../lib/status'
 import { IconHistory, IconRefresh } from './Icons'
 import { EmptyState, ErrorNote, Skeleton, Spinner } from './ui'
@@ -138,6 +139,14 @@ export function HistoryPanel({
                       </span>
                       <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[9px] text-muted">
                         <span className={`badge badge-square ${meta.badge}`}>{meta.label}</span>
+                        {job.protocol ? (
+                          <span
+                            className="badge badge-square border-line-strong bg-ink-800 text-muted"
+                            title="Probe protocol and destination port"
+                          >
+                            {probeLabel(job.protocol, job.port)}
+                          </span>
+                        ) : null}
                         <span
                           className="break-all font-mono text-dim"
                           title={formatDateTime(job.created_at)}

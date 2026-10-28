@@ -1,7 +1,15 @@
 import { useId } from 'react'
-import type { ControllerLimits } from '../api/types'
+import type { ControllerLimits, JobStatus, Protocol } from '../api/types'
 import { formatSeconds, pluralize } from '../lib/format'
-import type { JobStatus } from '../api/types'
+import {
+  DEFAULT_PORTS,
+  MAX_PORT,
+  MIN_PORT,
+  parsePortInput,
+  probeLabel,
+  protocolLabel,
+  protocolRequiresPort,
+} from '../lib/protocols'
 import { jobStatusMeta } from '../lib/status'
 import { IconPlay, IconStop } from './Icons'
 import { Spinner } from './ui'
@@ -58,8 +66,120 @@ function ParameterRange({
   )
 }
 
+function ProtocolSelector({
+  protocols,
+  protocol,
+  disabled,
+  onChange,
+}: {
+  protocols: readonly Protocol[]
+  protocol: Protocol
+  disabled: boolean
+  onChange: (protocol: Protocol) => void
+}) {
+  return (
+    <fieldset>
+      <legend className="flex w-full items-baseline justify-between gap-2">
+        <span className="text-[11px] text-fg-soft">Probe protocol</span>
+        <span className="font-mono text-[10px] text-dim">
+          {protocols.length} enabled
+        </span>
+      </legend>
+      <div className="mt-1 flex gap-1" role="group" aria-label="Probe protocol">
+        {protocols.map((option) => {
+          const selected = option === protocol
+          return (
+            <button
+              key={option}
+              type="button"
+              className={`flex-1 rounded border px-2 py-1 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+                selected
+                  ? 'border-accent/60 bg-accent/10 text-accent'
+                  : 'border-line bg-ink-950/50 text-muted hover:border-line-strong hover:text-fg'
+              }`}
+              aria-pressed={selected}
+              disabled={disabled}
+              onClick={() => onChange(option)}
+              title={
+                protocolRequiresPort(option)
+                  ? `${protocolLabel(option)} probes a single destination port`
+                  : 'ICMP echo probes do not use a destination port'
+              }
+            >
+              {protocolLabel(option)}
+            </button>
+          )
+        })}
+      </div>
+      <p className="mt-1 text-[10px] leading-snug text-dim">
+        Enabled by the controller. TCP/UDP probe one destination port; ICMP echo has no port.
+      </p>
+    </fieldset>
+  )
+}
+
+function PortInput({
+  protocol,
+  value,
+  error,
+  disabled,
+  onChange,
+}: {
+  protocol: Protocol
+  value: string
+  error: string | null
+  disabled: boolean
+  onChange: (value: string) => void
+}) {
+  const inputId = useId()
+  const helpId = useId()
+  const defaultPort = DEFAULT_PORTS[protocol === 'udp' ? 'udp' : 'tcp']
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-2">
+        <label htmlFor={inputId} className="text-[11px] text-fg-soft">
+          Destination port
+        </label>
+        <span className="font-mono text-[10px] text-dim">
+          {MIN_PORT}–{MAX_PORT}
+        </span>
+      </div>
+      <input
+        id={inputId}
+        type="number"
+        inputMode="numeric"
+        min={MIN_PORT}
+        max={MAX_PORT}
+        step={1}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className={`input mt-1 ${error ? 'border-bad' : ''}`}
+        aria-invalid={error !== null}
+        aria-describedby={helpId}
+        placeholder={String(defaultPort)}
+        disabled={disabled}
+      />
+      <p
+        id={helpId}
+        role={error ? 'alert' : undefined}
+        className={`mt-1 text-[10px] leading-snug ${error ? 'text-bad' : 'text-dim'}`}
+      >
+        {error ??
+          `Probed ${protocolLabel(protocol)} destination port. NextTrace default: ${defaultPort}.`}
+      </p>
+    </div>
+  )
+}
+
 export function RunPanel({
   limits,
+  protocols,
+  protocol,
+  onProtocolChange,
+  portInput,
+  portError,
+  onPortInputChange,
   maxHops,
   queries,
   timeoutMs,
@@ -77,6 +197,12 @@ export function RunPanel({
   onCancel,
 }: {
   limits: ControllerLimits
+  protocols: readonly Protocol[]
+  protocol: Protocol
+  onProtocolChange: (protocol: Protocol) => void
+  portInput: string
+  portError: string | null
+  onPortInputChange: (value: string) => void
   maxHops: number
   queries: number
   timeoutMs: number
@@ -97,6 +223,8 @@ export function RunPanel({
   const timeoutMax = Math.max(limits.min_execution_ms, limits.max_execution_ms)
   const reasonId = useId()
   const canStart = startBlockReason === null && !startBusy
+  const requiresPort = protocolRequiresPort(protocol)
+  const validPort = requiresPort && portError === null ? parsePortInput(portInput) : null
   const activeNonTerminal =
     activeJobId !== null &&
     activeJobStatus !== null &&
@@ -105,6 +233,9 @@ export function RunPanel({
     activeJobStatus !== 'failed' &&
     activeJobStatus !== 'cancelled'
   const statusMeta = activeJobStatus ? jobStatusMeta(activeJobStatus) : null
+  const dispatchLabel = `${protocolLabel(protocol)}${
+    requiresPort && validPort != null ? ` to port ${validPort}` : ''
+  }`
 
   return (
     <section className="panel" aria-labelledby="run-heading">
@@ -123,14 +254,32 @@ export function RunPanel({
             Server limits are authoritative and enforced again on submit
           </p>
         </div>
-        <span className="badge badge-square border-line-strong text-muted" title="Probe protocol">
-          icmp
+        <span
+          className="badge badge-square border-line-strong text-muted"
+          title="Selected probe protocol and destination port"
+        >
+          {probeLabel(protocol, validPort)}
         </span>
       </header>
 
       <div className="px-3 py-2.5">
         <fieldset className="space-y-2.5">
           <legend className="sr-only">Trace execution parameters</legend>
+          <ProtocolSelector
+            protocols={protocols}
+            protocol={protocol}
+            disabled={startBusy}
+            onChange={onProtocolChange}
+          />
+          {requiresPort ? (
+            <PortInput
+              protocol={protocol}
+              value={portInput}
+              error={portError}
+              disabled={startBusy}
+              onChange={onPortInputChange}
+            />
+          ) : null}
           <ParameterRange
             label="Max hops"
             hint={`TTL ceiling · server allows 1–${limits.max_hops}`}
@@ -171,9 +320,26 @@ export function RunPanel({
           <p className="mt-0.5 break-all font-mono text-[11px] text-fg-soft">
             {destination ?? 'no destination selected'}
           </p>
-          <p className="mt-0.5 text-[10px] text-muted">
-            {selectedNodeCount} {pluralize(selectedNodeCount, 'agent')} · {maxHops} hops ·{' '}
-            {queries} queries · {formatSeconds(timeoutMs)}
+          <p className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5 text-[10px] text-muted">
+            <span className="font-mono text-accent">{probeLabel(protocol, validPort)}</span>
+            <span aria-hidden="true" className="text-dim">
+              ·
+            </span>
+            <span>
+              {selectedNodeCount} {pluralize(selectedNodeCount, 'agent')}
+            </span>
+            <span aria-hidden="true" className="text-dim">
+              ·
+            </span>
+            <span>{maxHops} hops</span>
+            <span aria-hidden="true" className="text-dim">
+              ·
+            </span>
+            <span>{queries} queries</span>
+            <span aria-hidden="true" className="text-dim">
+              ·
+            </span>
+            <span>{formatSeconds(timeoutMs)}</span>
           </p>
         </div>
 
@@ -194,7 +360,7 @@ export function RunPanel({
             </p>
           ) : (
             <p className="text-center text-[10px] leading-snug text-dim">
-              Dispatches one ICMP trace per selected agent.
+              Dispatches one {dispatchLabel} trace per selected agent.
             </p>
           )}
 
@@ -221,8 +387,9 @@ export function RunPanel({
         </div>
 
         <p className="mt-2.5 border-t border-line/70 pt-2 text-[10px] leading-snug text-dim">
-          TraceCat never retries silently. Timeout applies to the entire execution, not one probe;
-          a router that ignores a probe is shown as “no reply”, not as a failure.
+          TraceCat never retries silently. TCP/UDP probes target the chosen destination port; ICMP
+          echo has none. Timeout applies to the entire execution, not one probe; a router that
+          ignores a probe is shown as “no reply”, not as a failure.
         </p>
       </div>
     </section>

@@ -223,14 +223,15 @@ func appendProbe(groups map[int][]model.Probe, raw json.RawMessage, fallbackTTL 
 // type drift in the external tool never crashes the Agent; known fields are
 // interpreted strictly enough to be useful, unknown fields are ignored.
 type rawHop struct {
-	TTL     json.RawMessage `json:"TTL"`
-	Success json.RawMessage `json:"Success"`
-	Address json.RawMessage `json:"Address"`
-	Domain  json.RawMessage `json:"Domain"`
-	RTT     json.RawMessage `json:"Rtt"`
-	Error   json.RawMessage `json:"Error"`
-	Geo     json.RawMessage `json:"Geo"`
-	MPLS    json.RawMessage `json:"MPLS"`
+	TTL      json.RawMessage `json:"TTL"`
+	Success  json.RawMessage `json:"Success"`
+	Address  json.RawMessage `json:"Address"`
+	Hostname json.RawMessage `json:"Hostname"`
+	Domain   json.RawMessage `json:"Domain"`
+	RTT      json.RawMessage `json:"Rtt"`
+	Error    json.RawMessage `json:"Error"`
+	Geo      json.RawMessage `json:"Geo"`
+	MPLS     json.RawMessage `json:"MPLS"`
 }
 
 func (h rawHop) normalize() (model.Probe, error) {
@@ -241,6 +242,11 @@ func (h rawHop) normalize() (model.Probe, error) {
 	domain := addressDomain
 	if domain == "" {
 		domain = looseString(h.Domain)
+	}
+	if domain == "" {
+		// NextTrace v1.7.x reports reverse DNS in the top-level Hostname field;
+		// older/alternate builds may use Domain or an Address.Domain member.
+		domain = looseString(h.Hostname)
 	}
 
 	if !hasSuccess && ip != "" {

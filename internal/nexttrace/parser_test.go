@@ -111,6 +111,19 @@ func TestParseGroupedOutput(t *testing.T) {
 	}
 }
 
+func TestParseTopLevelHostname(t *testing.T) {
+	t.Parallel()
+	fixture := `{"Hops":[[{"TTL":1,"Success":true,"Address":{"IP":"1.1.1.1"},"Hostname":"one.one.one.one","Rtt":1000000,"Geo":null}]]}`
+	parsed, apiErr := Parse([]byte(fixture), ParseOptions{TargetIP: "1.1.1.1"})
+	if apiErr != nil {
+		t.Fatalf("Parse: %v", apiErr)
+	}
+	probe := parsed.Hops[0].Probes[0]
+	if probe.PTR != "one.one.one.one" {
+		t.Fatalf("PTR = %q, want top-level Hostname to be used", probe.PTR)
+	}
+}
+
 func TestParseFlatOutput(t *testing.T) {
 	t.Parallel()
 	fixture := `{"Hops":[

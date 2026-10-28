@@ -51,16 +51,15 @@ shell, no user-controlled executable or flags, and no generic command API.
 ## Quick start (local development)
 
 Requirements: Go 1.23+ and NextTrace installed. Node/pnpm are needed **only**
-when rebuilding the dashboard; prebuilt assets are embedded so `go build` works
-without Node.
+when rebuilding the dashboard; the compiled dashboard is committed and
+embedded, so `make build` and `go build` need no Node.js.
 
 ```bash
-# 1. Build (skip `make ui` if you only want the committed dashboard assets)
-make ui
-make build-backend
+# 1. Build both binaries (dashboard assets are committed; no Node needed)
+make build
 
 # 2. Run an Agent against a dev config (loopback for local testing)
-TRACECAT_AGENT_TOKEN=dev-token-at-least-16-chars ./bin/tracecat-agent -config configs/agent.dev.json
+TRACECAT_AGENT_TOKEN=local-dev-token-please-change ./bin/tracecat-agent -config configs/agent.dev.json
 
 # 3. Run the Controller in explicit loopback-only dev mode
 ./bin/tracecat-controller -config configs/controller.dev.json
@@ -68,9 +67,8 @@ TRACECAT_AGENT_TOKEN=dev-token-at-least-16-chars ./bin/tracecat-agent -config co
 # 4. Open http://127.0.0.1:8080
 ```
 
-`make ui` requires Node 22+/pnpm; the deployed artifact is a single Go binary
-with static assets, so Node is never installed or run on servers. Node.js is
-build-time only.
+After changing dashboard sources, rebuild the committed assets with
+`make ui` (requires Node 22+/pnpm); deployed servers never run Node.
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for systemd, Tailscale and
 Cloudflare deployment, [docs/API.md](docs/API.md) for the wire contract, and

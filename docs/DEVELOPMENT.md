@@ -12,15 +12,15 @@
 ## Build
 
 ```bash
-make ui            # optional: rebuild dashboard into internal/webui/public
-make build-backend # Controller + Agent binaries in ./bin
-make build         # both
+make build          # Controller + Agent -> ./bin (uses committed UI assets; no Node needed)
+make ui             # optional: rebuild the dashboard from web/ (needs Node 22+/pnpm)
+make build-full     # rebuild dashboard + binaries
 ```
 
 The dashboard assets are committed under `internal/webui/public`, so a plain
 `go build ./cmd/tracecat-controller` works without Node installed. Rebuilding
-the UI requires pnpm and writes that directory, which should then be committed
-with the source change.
+the UI requires pnpm and rewrites that directory, which should then be committed
+with the source change. Deployed servers never run Node.js.
 
 ## Test
 

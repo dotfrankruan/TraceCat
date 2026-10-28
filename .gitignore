@@ -6,8 +6,9 @@
 # Frontend
 web/node_modules/
 web/dist/
-internal/webui/public/*
-!internal/webui/public/.gitkeep
+# The built dashboard in internal/webui/public is committed intentionally: the
+# Controller embeds it, so `go build` needs neither Node.js nor pnpm. Rebuild it
+# with `make ui` after changing web/ sources.
 
 # Go test / tooling output
 *.test

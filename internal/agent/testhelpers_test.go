@@ -134,6 +134,27 @@ func newTestAgentWithConfig(t *testing.T, ctrl fakeControl, mutate func(*Config)
 
 const testJobID = "8f0c2a1b4d5e6f708192a3b4c5d6e7f8"
 
+// icmpOnlyHelp models an older NextTrace build without TCP/UDP/port flags.
+const icmpOnlyHelp = `Usage:
+  nexttrace [flags] <target>
+
+Flags:
+  -4, --ipv4              only use IPv4
+  -6, --ipv6              only use IPv6
+  -j, --json              output JSON
+  -m, --max-hops int      maximum hops (default 30)
+  -q, --queries int       number of probes per hop (default 3)
+      --timeout int       probe timeout in milliseconds (default 1000)
+`
+
+// unusableHelp lacks --json so the binary cannot be used at all.
+const unusableHelp = `Flags:
+  -4
+  -6
+  -m, --max-hops int
+  -q, --queries int
+`
+
 const successTraceJSON = `{
   "Hops": [
     [

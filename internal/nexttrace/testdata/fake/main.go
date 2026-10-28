@@ -25,6 +25,9 @@ const defaultHelp = `Usage:
 Flags:
   -4, --ipv4              only use IPv4
   -6, --ipv6              only use IPv6
+  -T, --tcp               use TCP SYN probes
+  -U, --udp               use UDP probes
+  -p, --port int          destination port (default 80)
   -j, --json              output JSON
   -m, --max-hops int      maximum hops (default 30)
   -q, --queries int       number of probes per hop (default 3)

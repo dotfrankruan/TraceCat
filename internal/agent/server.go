@@ -41,9 +41,10 @@ type Agent struct {
 	info   model.NextTraceInfo
 	limits model.AgentLimits
 
-	limiter  *rateLimiter
-	httpSem  chan struct{}
-	traceSem chan struct{}
+	limiter   *rateLimiter
+	httpSem   chan struct{}
+	traceSem  chan struct{}
+	protocols []model.Protocol
 
 	handler http.Handler
 	baseCtx context.Context
@@ -102,11 +103,23 @@ func New(cfg Config, logger *slog.Logger) (*Agent, error) {
 		logger.Info("nexttrace detected", "nexttrace_version", caps.Version, "capabilities", agent.info.Capabilities)
 	}
 	agent.runner = nexttrace.NewRunner(cfg.NextTrace.Binary, caps)
+
+	configuredProtocols, err := model.ParseProtocolList(cfg.NextTrace.AllowedProtocols)
+	if err != nil {
+		return nil, fmt.Errorf("nexttrace.allowed_protocols: %s", errorMessage(err))
+	}
+	agent.protocols = make([]model.Protocol, 0, len(configuredProtocols))
+	for _, protocol := range configuredProtocols {
+		if caps.SupportsProtocol(protocol) {
+			agent.protocols = append(agent.protocols, protocol)
+		}
+	}
 	agent.limits = model.AgentLimits{
 		MaxHops:             model.MaxMaxHops,
 		MaxQueries:          model.MaxQueries,
 		MaxTimeoutMS:        cfg.NextTrace.MaxExecutionMS,
 		MaxConcurrentTraces: cfg.NextTrace.MaxConcurrentTraces,
+		Protocols:           model.ProtocolNames(agent.protocols),
 	}
 	agent.handler = http.HandlerFunc(agent.serveHTTP)
 	return agent, nil
@@ -337,6 +350,20 @@ func (a *Agent) handleTrace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, model.ErrInvalidRequest, "timeout_ms exceeds this Agent's maximum")
 		return
 	}
+	// Redundant with req.Validate, but this is the Agent-local authoritative
+	// check: the port contract is enforced at the boundary that executes.
+	if err := model.ValidatePortForProtocol(req.Protocol, req.Port); err != nil {
+		writeError(w, http.StatusBadRequest, model.ErrInvalidRequest, errorMessage(err))
+		return
+	}
+	// When the binary is usable, a protocol not enabled by this Agent or not
+	// supported by the installed binary is a malformed request. When the binary
+	// is unusable the trace proceeds to executeTrace, which reports
+	// nexttrace_unavailable (HTTP 200 + terminal failed status).
+	if a.caps.Available() && !a.protocolEnabled(req.Protocol) {
+		writeError(w, http.StatusBadRequest, model.ErrInvalidRequest, "protocol is not enabled by this Agent")
+		return
+	}
 
 	if !a.acquireTrace() {
 		writeError(w, http.StatusServiceUnavailable, model.ErrBusy, "too many concurrent traces")
@@ -356,6 +383,7 @@ func (a *Agent) handleTrace(w http.ResponseWriter, r *http.Request) {
 		TargetIP:           target.String(),
 		Family:             req.Family,
 		Protocol:           req.Protocol,
+		Port:               req.Port,
 		StartedAt:          formatTimestamp(started),
 		EndedAt:            formatTimestamp(ended),
 		DurationMS:         ended.Sub(started).Milliseconds(),
@@ -371,9 +399,13 @@ func (a *Agent) handleTrace(w http.ResponseWriter, r *http.Request) {
 	attrs := []any{
 		"job_id", req.JobID,
 		"target", target.String(),
+		"protocol", req.Protocol,
 		"status", outcome.status,
 		"duration_ms", response.DurationMS,
 		"hop_count", len(outcome.hops),
+	}
+	if req.Port != nil {
+		attrs = append(attrs, "port", *req.Port)
 	}
 	if outcome.err != nil {
 		attrs = append(attrs, "error_code", outcome.err.Code)
@@ -393,6 +425,17 @@ func (a *Agent) acquireTrace() bool {
 }
 
 func (a *Agent) releaseTrace() { <-a.traceSem }
+
+// protocolEnabled reports whether protocol is in the Agent's effective
+// protocol list (configured allowlist intersected with binary capabilities).
+func (a *Agent) protocolEnabled(protocol model.Protocol) bool {
+	for _, enabled := range a.protocols {
+		if enabled == protocol {
+			return true
+		}
+	}
+	return false
+}
 
 func methodNotAllowed(w http.ResponseWriter, allowed string) {
 	w.Header().Set("Allow", allowed)

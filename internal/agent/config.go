@@ -82,6 +82,11 @@ type NextTraceConfig struct {
 	MaxStdoutBytes      int64  `json:"max_stdout_bytes"`
 	MaxRawBytes         int64  `json:"max_raw_bytes"`
 	GeoProvider         string `json:"geo_provider"`
+	// AllowedProtocols is the administrator protocol allowlist. The Agent's
+	// effective protocols are this list intersected with the installed
+	// NextTrace binary's detected capabilities. Nil means the default
+	// ["icmp","tcp","udp"]; an explicitly empty list is rejected.
+	AllowedProtocols []string `json:"allowed_protocols"`
 }
 
 // SecurityConfig is the Agent's local defense-in-depth policy.
@@ -189,6 +194,9 @@ func (c *Config) applyDefaults() {
 	if c.NextTrace.MaxRawBytes == 0 {
 		c.NextTrace.MaxRawBytes = nexttrace.DefaultMaxRawBytes
 	}
+	if c.NextTrace.AllowedProtocols == nil {
+		c.NextTrace.AllowedProtocols = defaultAllowedProtocols()
+	}
 	if c.RateLimit.RequestsPerMinute == 0 {
 		c.RateLimit.RequestsPerMinute = 60
 	}
@@ -253,6 +261,13 @@ func (c *Config) Validate() error {
 	}
 	if !allowedGeoProviders[strings.ToLower(strings.TrimSpace(c.NextTrace.GeoProvider))] {
 		return errors.New("nexttrace.geo_provider is not an allowed provider")
+	}
+	allowedProtocols := c.NextTrace.AllowedProtocols
+	if allowedProtocols == nil {
+		allowedProtocols = defaultAllowedProtocols()
+	}
+	if _, err := model.ParseProtocolList(allowedProtocols); err != nil {
+		return fmt.Errorf("nexttrace.allowed_protocols: %s", errorMessage(err))
 	}
 	if _, err := ipguard.NewPolicy(c.Security.AllowedCIDRs); err != nil {
 		return fmt.Errorf("security.allowed_cidrs: %w", err)
@@ -319,6 +334,16 @@ func validateBinary(path string) error {
 		return fmt.Errorf("nexttrace.binary %q must not be world-writable", path)
 	}
 	return nil
+}
+
+// defaultAllowedProtocols is the protocol allowlist used when the operator
+// does not configure one.
+func defaultAllowedProtocols() []string {
+	return []string{
+		string(model.ProtocolICMP),
+		string(model.ProtocolTCP),
+		string(model.ProtocolUDP),
+	}
 }
 
 // buildPolicy combines the configured CIDR allowlist with the explicit

@@ -49,6 +49,12 @@ func TestParseFlags(t *testing.T) {
 		"queries":    full.QueriesShort && full.QueriesLong,
 		"timeout":    full.Timeout,
 		"traceroute": full.Traceroute,
+		"tcp_short":  full.TCPShort,
+		"tcp_long":   full.TCPLong,
+		"udp_short":  full.UDPShort,
+		"udp_long":   full.UDPLong,
+		"port_short": full.PortShort,
+		"port_long":  full.PortLong,
 	} {
 		if !got {
 			t.Errorf("flag %s not detected in full help output", name)
@@ -62,6 +68,9 @@ func TestParseFlags(t *testing.T) {
 	mentionedOnly := parseFlags(`Flags:
   -4, --ipv4              only use IPv4
   -6, --ipv6              only use IPv6
+  -T, --tcp               use TCP SYN probes
+  -U, --udp               use UDP probes
+  -p, --port int          destination port (default 80)
   -j, --json              output JSON
   -m, --max-hops int      maximum hops (default 30)
   -q, --queries int       number of probes per hop (default 3)
@@ -166,12 +175,70 @@ const defaultHelpForTest = `Usage:
 Flags:
   -4, --ipv4              only use IPv4
   -6, --ipv6              only use IPv6
+  -T, --tcp               use TCP SYN probes
+  -U, --udp               use UDP probes
+  -p, --port int          destination port (default 80)
   -j, --json              output JSON
   -m, --max-hops int      maximum hops (default 30)
   -q, --queries int       number of probes per hop (default 3)
       --timeout int       probe timeout in milliseconds (default 1000)
       --traceroute        use traceroute-style probing
 `
+
+// TestParseFlagsRealNextTraceV173Format guards against the pflag help layout
+// used by the real v1.7.3 binary, where short and long aliases are separated
+// by two spaces with no comma and descriptions may wrap onto continuation
+// lines.
+func TestParseFlagsRealNextTraceV173Format(t *testing.T) {
+	t.Parallel()
+	help := `usage: nexttrace [-h|--help] [-4|--ipv4] [-6|--ipv6] [-T|--tcp] [-U|--udp]
+  -4  --ipv4                         Use IPv4 only
+  -6  --ipv6                         Use IPv6 only
+  -T  --tcp                          Use TCP SYN for tracerouting (default
+                                     dest-port is 80)
+  -U  --udp                          Use UDP SYN for tracerouting (default
+                                     dest-port is 33494)
+  -p  --port                         Set the destination port to use. With
+                                     default of 80 for "tcp", 33494 for "udp"
+  -j  --json                         Output trace results as JSON
+  -q  --queries                      Latency samples per hop.
+                                     Default: 3
+  -m  --max-hops                     Set the max number of hops. Default: 30
+      --timeout <integer>            Set timeout for each probe
+`
+	flags := parseFlags(help)
+	for name, ok := range map[string]bool{
+		"tcp":      flags.TCPShort && flags.TCPLong,
+		"udp":      flags.UDPShort && flags.UDPLong,
+		"port":     flags.PortShort && flags.PortLong,
+		"json":     flags.JSON,
+		"ipv4":     flags.IPv4,
+		"ipv6":     flags.IPv6,
+		"max_hops": flags.MaxHopsShort && flags.MaxHopsLong,
+		"queries":  flags.QueriesShort && flags.QueriesLong,
+		"timeout":  flags.Timeout,
+	} {
+		if !ok {
+			t.Fatalf("flag %s not detected in real v1.7.3 help format", name)
+		}
+	}
+	if flags.Traceroute {
+		t.Fatal("real v1.7.3 help has no --traceroute flag and none must be assumed")
+	}
+	caps := Capabilities{Version: "v1.7.3", Flags: flags}
+	if !caps.Available() || !caps.SupportsProtocol(model.ProtocolICMP) {
+		t.Fatal("real v1.7.3 layout should be usable for ICMP")
+	}
+	if !caps.SupportsProtocol(model.ProtocolTCP) || !caps.SupportsProtocol(model.ProtocolUDP) {
+		t.Fatal("real v1.7.3 layout should support TCP and UDP")
+	}
+	if flag, ok := caps.Flags.tcpFlag(); !ok || flag != "-T" {
+		t.Fatalf("tcpFlag = %q, %v; want -T", flag, ok)
+	}
+	if flag, ok := caps.Flags.portFlag(); !ok || flag != "-p" {
+		t.Fatalf("portFlag = %q, %v; want -p", flag, ok)
+	}
+}
 
 func TestDetectFakeBinary(t *testing.T) {
 	fake := newFake(t, fakeControl{})
@@ -188,12 +255,94 @@ func TestDetectFakeBinary(t *testing.T) {
 	}
 	wantCaps := []string{
 		CapabilityIPv4, CapabilityIPv6, CapabilityJSON,
-		CapabilityMaxHops, CapabilityQueries, CapabilityTimeout, CapabilityTraceroute,
+		CapabilityMaxHops, CapabilityPort, CapabilityQueries,
+		CapabilityTCP, CapabilityTimeout, CapabilityTraceroute, CapabilityUDP,
 	}
 	got := caps.CapabilityNames()
 	if strings.Join(got, ",") != strings.Join(wantCaps, ",") {
 		t.Fatalf("capabilities = %v, want %v", got, wantCaps)
 	}
+}
+
+func TestDetectOptionalProtocolCapabilities(t *testing.T) {
+	baseHelp := `Flags:
+  -4, --ipv4
+  -6, --ipv6
+  -j, --json
+  -m, --max-hops int
+  -q, --queries int
+`
+	t.Run("icmp-only binary", func(t *testing.T) {
+		fake := newFake(t, fakeControl{Help: baseHelp})
+		caps, apiErr := Detect(context.Background(), fake)
+		if apiErr != nil {
+			t.Fatalf("Detect: %v", apiErr)
+		}
+		if !caps.Available() {
+			t.Fatal("an ICMP-only binary must remain usable")
+		}
+		if !caps.SupportsProtocol(model.ProtocolICMP) {
+			t.Fatal("ICMP should be supported")
+		}
+		if caps.SupportsProtocol(model.ProtocolTCP) || caps.SupportsProtocol(model.ProtocolUDP) {
+			t.Fatal("TCP/UDP must not be supported without their flags")
+		}
+		for _, unsupported := range []string{CapabilityTCP, CapabilityUDP, CapabilityPort} {
+			for _, name := range caps.CapabilityNames() {
+				if name == unsupported {
+					t.Fatalf("capabilities %v must not include %q", caps.CapabilityNames(), unsupported)
+				}
+			}
+		}
+	})
+
+	t.Run("tcp without port flag is not effective", func(t *testing.T) {
+		fake := newFake(t, fakeControl{Help: baseHelp + `  -T, --tcp
+  -U, --udp
+`})
+		caps, apiErr := Detect(context.Background(), fake)
+		if apiErr != nil {
+			t.Fatalf("Detect: %v", apiErr)
+		}
+		if !caps.SupportsProtocol(model.ProtocolICMP) {
+			t.Fatal("ICMP should remain supported")
+		}
+		if caps.SupportsProtocol(model.ProtocolTCP) || caps.SupportsProtocol(model.ProtocolUDP) {
+			t.Fatal("TCP/UDP require a detected port flag to be effective")
+		}
+		names := caps.CapabilityNames()
+		if !containsString(names, CapabilityTCP) || !containsString(names, CapabilityUDP) {
+			t.Fatalf("raw capabilities should still report detected protocol flags: %v", names)
+		}
+		if containsString(names, CapabilityPort) {
+			t.Fatalf("port must not be reported without a port flag: %v", names)
+		}
+	})
+
+	t.Run("long spellings only", func(t *testing.T) {
+		fake := newFake(t, fakeControl{Help: baseHelp + `  --tcp
+  --udp
+  --port int
+`})
+		caps, apiErr := Detect(context.Background(), fake)
+		if apiErr != nil {
+			t.Fatalf("Detect: %v", apiErr)
+		}
+		for _, protocol := range []model.Protocol{model.ProtocolICMP, model.ProtocolTCP, model.ProtocolUDP} {
+			if !caps.SupportsProtocol(protocol) {
+				t.Fatalf("protocol %s should be supported with long flags", protocol)
+			}
+		}
+		if flag, ok := caps.Flags.tcpFlag(); !ok || flag != "--tcp" {
+			t.Fatalf("tcpFlag = %q, %v", flag, ok)
+		}
+		if flag, ok := caps.Flags.udpFlag(); !ok || flag != "--udp" {
+			t.Fatalf("udpFlag = %q, %v", flag, ok)
+		}
+		if flag, ok := caps.Flags.portFlag(); !ok || flag != "--port" {
+			t.Fatalf("portFlag = %q, %v", flag, ok)
+		}
+	})
 }
 
 func TestDetectRejectsMissingRequiredFlags(t *testing.T) {

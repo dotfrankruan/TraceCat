@@ -53,7 +53,7 @@ func TestHealth(t *testing.T) {
 	if !health.NextTrace.Available || health.NextTrace.Version != "v1.7.1" {
 		t.Fatalf("nexttrace = %+v", health.NextTrace)
 	}
-	for _, capability := range []string{"json", "ipv4", "ipv6", "max_hops", "queries", "timeout"} {
+	for _, capability := range []string{"json", "ipv4", "ipv6", "max_hops", "queries", "timeout", "tcp", "udp", "port"} {
 		if !containsString(health.NextTrace.Capabilities, capability) {
 			t.Fatalf("capabilities %v missing %q", health.NextTrace.Capabilities, capability)
 		}
@@ -63,6 +63,9 @@ func TestHealth(t *testing.T) {
 	}
 	if health.Limits.MaxConcurrentTraces != 4 || health.Limits.MaxTimeoutMS != 60_000 {
 		t.Fatalf("limits = %+v", health.Limits)
+	}
+	if strings.Join(health.Limits.Protocols, ",") != "icmp,tcp,udp" {
+		t.Fatalf("limits.protocols = %v, want [icmp tcp udp]", health.Limits.Protocols)
 	}
 	if _, err := time.Parse(time.RFC3339Nano, health.Time); err != nil {
 		t.Fatalf("time %q is not RFC3339: %v", health.Time, err)
@@ -93,6 +96,9 @@ func TestHealthDegradedWhenNextTraceUnusable(t *testing.T) {
 	}
 	if health.NextTrace.Error == nil || health.NextTrace.Error.Code != model.ErrNextTraceMissing {
 		t.Fatalf("nexttrace error = %+v", health.NextTrace.Error)
+	}
+	if len(health.Limits.Protocols) != 0 {
+		t.Fatalf("degraded agent reported effective protocols %v, want none", health.Limits.Protocols)
 	}
 }
 
@@ -200,6 +206,9 @@ func TestTraceSuccess(t *testing.T) {
 	if strings.Contains(body, fake) || strings.Contains(body, testToken) {
 		t.Fatalf("response leaked internal data: %s", body)
 	}
+	if strings.Contains(body, `"port"`) {
+		t.Fatalf("ICMP response must omit port: %s", body)
+	}
 }
 
 func TestTraceRejectsInvalidRequests(t *testing.T) {
@@ -228,7 +237,12 @@ func TestTraceRejectsInvalidRequests(t *testing.T) {
 		{name: "wrong schema", method: http.MethodPost, path: "/v1/trace", body: traceRequestJSON(map[string]any{"schema_version": "tracecat.agent.v2"}), wantStatus: 400, wantCode: model.ErrUnsupportedVersion},
 		{name: "node mismatch", method: http.MethodPost, path: "/v1/trace", body: traceRequestJSON(map[string]any{"node_id": "other-1"}), wantStatus: 403, wantCode: model.ErrForbidden},
 		{name: "family mismatch", method: http.MethodPost, path: "/v1/trace", body: traceRequestJSON(map[string]any{"family": "ipv6"}), wantStatus: 400, wantCode: model.ErrInvalidRequest},
-		{name: "protocol rejected", method: http.MethodPost, path: "/v1/trace", body: traceRequestJSON(map[string]any{"protocol": "tcp"}), wantStatus: 400, wantCode: model.ErrInvalidRequest},
+		{name: "invalid protocol", method: http.MethodPost, path: "/v1/trace", body: traceRequestJSON(map[string]any{"protocol": "sctp"}), wantStatus: 400, wantCode: model.ErrInvalidRequest},
+		{name: "tcp missing port", method: http.MethodPost, path: "/v1/trace", body: traceRequestJSON(map[string]any{"protocol": "tcp"}), wantStatus: 400, wantCode: model.ErrInvalidRequest},
+		{name: "udp missing port", method: http.MethodPost, path: "/v1/trace", body: traceRequestJSON(map[string]any{"protocol": "udp"}), wantStatus: 400, wantCode: model.ErrInvalidRequest},
+		{name: "port on icmp", method: http.MethodPost, path: "/v1/trace", body: traceRequestJSON(map[string]any{"port": 443}), wantStatus: 400, wantCode: model.ErrInvalidRequest},
+		{name: "tcp port zero", method: http.MethodPost, path: "/v1/trace", body: traceRequestJSON(map[string]any{"protocol": "tcp", "port": 0}), wantStatus: 400, wantCode: model.ErrInvalidRequest},
+		{name: "tcp port above max", method: http.MethodPost, path: "/v1/trace", body: traceRequestJSON(map[string]any{"protocol": "tcp", "port": 65536}), wantStatus: 400, wantCode: model.ErrInvalidRequest},
 		{name: "private target", method: http.MethodPost, path: "/v1/trace", body: traceRequestJSON(map[string]any{"target_ip": "10.0.0.1"}), wantStatus: 422, wantCode: model.ErrTargetRejected},
 		{name: "loopback target", method: http.MethodPost, path: "/v1/trace", body: traceRequestJSON(map[string]any{"target_ip": "127.0.0.1"}), wantStatus: 422, wantCode: model.ErrTargetRejected},
 		{name: "cgnat target", method: http.MethodPost, path: "/v1/trace", body: traceRequestJSON(map[string]any{"target_ip": "100.64.0.1"}), wantStatus: 422, wantCode: model.ErrTargetRejected},
@@ -613,4 +627,132 @@ func TestRunGracefulShutdown(t *testing.T) {
 		_ = response.Body.Close()
 		t.Fatal("listener still accepts connections after shutdown")
 	}
+}
+
+func TestTraceTCPAndUDP(t *testing.T) {
+	cases := []struct {
+		name      string
+		protocol  string
+		port      int
+		protoFlag string
+	}{
+		{name: "tcp syn", protocol: "tcp", port: 443, protoFlag: "-T"},
+		{name: "udp", protocol: "udp", port: model.DefaultUDPPort, protoFlag: "-U"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			agent, fake := newTestAgent(t, fakeControl{Stdout: successTraceJSON})
+
+			rec := doRequest(t, agent.Handler(), http.MethodPost, "/v1/trace",
+				traceRequestJSON(map[string]any{"protocol": tc.protocol, "port": tc.port}), requestOptions{})
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+			}
+			response := decodeTraceResponse(t, rec)
+			if response.Status != model.NodeCompleted {
+				t.Fatalf("status = %s, error = %+v", response.Status, response.Error)
+			}
+			if response.Protocol != model.Protocol(tc.protocol) {
+				t.Fatalf("protocol = %q, want %q", response.Protocol, tc.protocol)
+			}
+			if response.Port == nil || *response.Port != tc.port {
+				t.Fatalf("echoed port = %v, want %d", response.Port, tc.port)
+			}
+			if !strings.Contains(rec.Body.String(), `"port":`) {
+				t.Fatalf("response omits the echoed port: %s", rec.Body.String())
+			}
+
+			wantArgs := []string{
+				"-4", tc.protoFlag, "--traceroute", "--json",
+				"-q", "3", "-m", "30", "--timeout", "1000",
+				"-p", strconv.Itoa(tc.port), "1.1.1.1",
+			}
+			if got := readFakeArgs(t, fake); strings.Join(got, "\x00") != strings.Join(wantArgs, "\x00") {
+				t.Fatalf("argv = %v, want %v", got, wantArgs)
+			}
+		})
+	}
+}
+
+func TestTraceProtocolAllowlistAndCapabilities(t *testing.T) {
+	t.Run("protocol disabled by config", func(t *testing.T) {
+		agent, fake := newTestAgentWithConfig(t, fakeControl{Stdout: successTraceJSON}, func(c *Config) {
+			c.NextTrace.AllowedProtocols = []string{"icmp"}
+		})
+		health := doRequest(t, agent.Handler(), http.MethodGet, "/v1/health", nil, requestOptions{})
+		var healthBody model.AgentHealth
+		if err := json.Unmarshal(health.Body.Bytes(), &healthBody); err != nil {
+			t.Fatalf("decoding health: %v", err)
+		}
+		if strings.Join(healthBody.Limits.Protocols, ",") != "icmp" {
+			t.Fatalf("effective protocols = %v, want [icmp]", healthBody.Limits.Protocols)
+		}
+
+		rec := doRequest(t, agent.Handler(), http.MethodPost, "/v1/trace",
+			traceRequestJSON(map[string]any{"protocol": "tcp", "port": 443}), requestOptions{})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+		}
+		if envelope := decodeAPIError(t, rec); envelope.Error.Code != model.ErrInvalidRequest {
+			t.Fatalf("error = %s, want invalid_request", envelope.Error.Code)
+		}
+		if _, err := os.Stat(fake + ".args"); err == nil {
+			t.Fatal("nexttrace was executed for a config-disabled protocol")
+		}
+
+		// ICMP remains usable with the same configuration.
+		icmp := doRequest(t, agent.Handler(), http.MethodPost, "/v1/trace", traceRequestJSON(nil), requestOptions{})
+		if icmp.Code != http.StatusOK {
+			t.Fatalf("icmp status = %d, want 200: %s", icmp.Code, icmp.Body.String())
+		}
+	})
+
+	t.Run("protocol unsupported by binary", func(t *testing.T) {
+		agent, fake := newTestAgentWithConfig(t, fakeControl{Help: icmpOnlyHelp, Stdout: successTraceJSON}, nil)
+		health := doRequest(t, agent.Handler(), http.MethodGet, "/v1/health", nil, requestOptions{})
+		var healthBody model.AgentHealth
+		if err := json.Unmarshal(health.Body.Bytes(), &healthBody); err != nil {
+			t.Fatalf("decoding health: %v", err)
+		}
+		if strings.Join(healthBody.Limits.Protocols, ",") != "icmp" {
+			t.Fatalf("effective protocols = %v, want [icmp]", healthBody.Limits.Protocols)
+		}
+		for _, capability := range []string{"tcp", "udp", "port"} {
+			if containsString(healthBody.NextTrace.Capabilities, capability) {
+				t.Fatalf("capabilities %v unexpectedly include %q", healthBody.NextTrace.Capabilities, capability)
+			}
+		}
+
+		rec := doRequest(t, agent.Handler(), http.MethodPost, "/v1/trace",
+			traceRequestJSON(map[string]any{"protocol": "udp", "port": 33494}), requestOptions{})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+		}
+		if _, err := os.Stat(fake + ".args"); err == nil {
+			t.Fatal("nexttrace was executed for a binary-unsupported protocol")
+		}
+	})
+
+	t.Run("binary unusable reports terminal failure", func(t *testing.T) {
+		agent, fake := newTestAgentWithConfig(t, fakeControl{Help: unusableHelp}, nil)
+		rec := doRequest(t, agent.Handler(), http.MethodPost, "/v1/trace",
+			traceRequestJSON(map[string]any{"protocol": "tcp", "port": 443}), requestOptions{})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		response := decodeTraceResponse(t, rec)
+		if response.Status != model.NodeFailed {
+			t.Fatalf("status = %s, want failed", response.Status)
+		}
+		if response.Error == nil || response.Error.Code != model.ErrNextTraceMissing {
+			t.Fatalf("error = %+v, want nexttrace_unavailable", response.Error)
+		}
+		if response.Port == nil || *response.Port != 443 {
+			t.Fatalf("failed tcp response should still echo the port: %v", response.Port)
+		}
+		if _, err := os.Stat(fake + ".args"); err == nil {
+			t.Fatal("nexttrace was executed despite being unusable")
+		}
+	})
 }

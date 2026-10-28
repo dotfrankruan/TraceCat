@@ -21,8 +21,11 @@ the executable path, arguments or environment.
   executable, not world-writable) and is never derived from a request.
 - **Typed argument vector only.** Arguments are built from validated,
   already-normalized values (`netip.Addr`, enum family/protocol, bounded
-  integers). There is no string concatenation of user input into a command
-  line, no shell (`sh`, `bash`, `eval`, `exec`) and no environment expansion.
+  integers). Protocols are the fixed `icmp`/`tcp`/`udp` enum and ports are
+  bounded integers in `1 .. 65535`; they are never strings, ranges, service
+  names or arbitrary flags. There is no string concatenation of user input
+  into a command line, no shell (`sh`, `bash`, `eval`, `exec`) and no
+  environment expansion.
 - **Target is always last.** The final argument is the canonical
   `netip.Addr.String()` of the destination. Requests carrying hostnames,
   brackets, zones, whitespace, shell metacharacters or IPv4-mapped IPv6 forms
@@ -51,7 +54,9 @@ expose the required command-line surface below; the Agent never assumes a flag
 exists.
 
 The Agent detects flags from the installed binary's own `--version` and
-`--help` output at startup:
+`--help` output at startup. Real NextTrace uses a pflag layout such as
+`-T  --tcp` / `-p  --port` (two spaces, no comma between aliases); that exact
+layout is covered by a regression test alongside the comma-separated form.
 
 | Capability reported by `/v1/health` | Flag detection requirement | Required |
 | ----------------------------------- | -------------------------- | -------- |
@@ -62,18 +67,32 @@ The Agent detects flags from the installed binary's own `--version` and
 | `queries`                           | `-q` or `--queries`        | yes      |
 | `timeout`                           | `--timeout`                | optional |
 | `traceroute`                        | `--traceroute`             | optional |
+| `tcp`                               | `-T` (or `--tcp`)          | optional |
+| `udp`                               | `-U` (or `--udp`)          | optional |
+| `port`                              | `-p` or `--port`           | optional |
+
+ICMP is NextTrace's default mode and needs only the required base flags. The
+TCP, UDP and port capabilities are optional so that older binaries remain
+usable for ICMP. A TCP or UDP probe is effective only when **both** its protocol
+flag and the destination-port flag were detected; otherwise the Agent keeps the
+binary usable for ICMP, advertises only the supported protocols in
+`limits.protocols`, and rejects requests for the unavailable protocol with
+`400 invalid_request`. MTR/session mode is not supported: TraceCat always runs
+one-shot traces.
 
 If a required flag is missing, the Agent still starts but reports
 `status: "degraded"` on `/v1/health`; every `POST /v1/trace` then returns HTTP
 200 with `status: "failed"` and `error.code: "nexttrace_unavailable"`. The
 executable path is never included in health responses or errors.
 
-The argument constructor uses the short spellings (`-m`, `-q`) when detected,
-falling back to the long spellings (`--max-hops`, `--queries`) otherwise. The
-`--traceroute` flag is inserted immediately after the family flag only when it
-was detected. `--timeout` is included only when detected.
+The argument constructor uses the short spellings (`-T`, `-U`, `-p`, `-m`,
+`-q`) when detected, falling back to the long spellings (`--tcp`, `--udp`,
+`--port`, `--max-hops`, `--queries`) otherwise. The argument order is fixed:
+family flag, protocol flag (TCP/UDP only; ICMP has none), optional
+`--traceroute`, `--json`, queries flag + value, max-hops flag + value, optional
+`--timeout` + value, optional `-p` + destination port, target last.
 
-### Exact argument vectors (ICMP)
+### Exact argument vectors
 
 IPv4, verified NextTrace v1.7.1, `max_hops=30`, `queries=3`,
 `probe_timeout_ms=1000`:
@@ -88,18 +107,41 @@ IPv6:
 -6 --json -q 3 -m 30 --timeout 1000 2606:4700:4700::1111
 ```
 
-When the binary exposes `--traceroute`, it is added directly after the family
-flag:
+TCP SYN to destination port 443 (the port is the remote TCP port on the
+target, not a local port; 443/80 are typical):
+
+```text
+-4 -T --json -q 3 -m 30 --timeout 1000 -p 443 1.1.1.1
+```
+
+UDP to destination port 33494 (TraceCat's conventional UDP default, but the
+Agent always receives an explicit validated port; it never relies on a
+NextTrace default):
+
+```text
+-4 -U --json -q 3 -m 30 --timeout 1000 -p 33494 1.1.1.1
+```
+
+IPv6 TCP to destination port 80:
+
+```text
+-6 -T --json -q 3 -m 30 --timeout 1000 -p 80 2606:4700:4700::1111
+```
+
+When the binary exposes `--traceroute`, it is inserted after the family/protocol
+flags:
 
 ```text
 -4 --traceroute --json -q 3 -m 30 --timeout 1000 1.1.1.1
+-4 -T --traceroute --json -q 3 -m 30 --timeout 1000 -p 443 1.1.1.1
 ```
 
 The target is always the last argument. The Agent re-checks the constructed
-vector against a strict allowlist before `exec` (family flag, optional
-`--traceroute`, `--json`, queries flag + value, max-hops flag + value, optional
-`--timeout` + value, canonical target), and rejects any mismatch as an internal
-error instead of executing.
+vector against a strict allowlist before `exec` (family flag, protocol flag,
+optional `--traceroute`, `--json`, queries flag + value, max-hops flag + value,
+optional `--timeout` + value, optional port flag + value, canonical target),
+and rejects any mismatch as an internal error instead of executing. ICMP argv
+never contains a port flag; TCP/UDP argv is never built without one.
 
 ---
 
@@ -115,6 +157,12 @@ Detection never exposes the executable path, raw command output or
 environment. Failures collapse to safe messages such as
 `nexttrace capability detection timed out` or
 `installed nexttrace does not support the flags TraceCat requires`.
+
+The Agent's **effective protocol list** is the configured
+`nexttrace.allowed_protocols` intersected with the protocols the binary can
+actually execute (ICMP always when the base flags are present; TCP/UDP only
+with both their protocol flag and the port flag). It is reported as
+`limits.protocols` on `/v1/health` and enforced on every trace request.
 
 `GET /v1/health` (authenticated with the Agent bearer token) reports the
 cached result:
@@ -135,7 +183,8 @@ cached result:
     "max_hops": 64,
     "max_queries": 5,
     "max_timeout_ms": 60000,
-    "max_concurrent_traces": 4
+    "max_concurrent_traces": 4,
+    "protocols": ["icmp", "tcp", "udp"]
   }
 }
 ```
@@ -156,7 +205,8 @@ never serves health data without a valid bearer token.
     "max_execution_ms": 60000,
     "max_stdout_bytes": 4194304,
     "max_raw_bytes": 1048576,
-    "geo_provider": ""
+    "geo_provider": "",
+    "allowed_protocols": ["icmp", "tcp", "udp"]
   }
 }
 ```
@@ -170,6 +220,7 @@ never serves health data without a valid bearer token.
 | `max_stdout_bytes`       | `4194304`   | Hard stdout cap; exceeding it kills the process group and reports `output_too_large`. |
 | `max_raw_bytes`          | `1048576`   | Maximum raw NextTrace JSON retained in the response; larger results set `raw_result_truncated=true` and omit `raw_result`. |
 | `geo_provider`           | `""`        | Reserved allowlisted provider hint (`ipinfo`, `ip-api`, `ipdb`, `maxmind`, `cloudflare`, `none`); it does not alter the argv in the MVP. |
+| `allowed_protocols`      | `["icmp","tcp","udp"]` | Administrator protocol allowlist (`icmp`, `tcp`, `udp`). Validated with duplicate/invalid/empty rejection; the effective list is this ∩ binary capabilities and is advertised as `limits.protocols`. |
 
 NextTrace execution is additionally limited by `security.allowed_cidrs`,
 `security.allow_private_targets` (default `false`) and the global `ipguard`
@@ -212,6 +263,9 @@ Normalization rules:
 - Unparseable or structurally unexpected JSON yields `parse_error`; the parser
   never returns partially fabricated hops. The raw JSON is retained unmodified
   only when it fits `max_raw_bytes`; otherwise `raw_result_truncated=true`.
+- The response echoes the requested `protocol` and, for TCP/UDP, the validated
+  destination `port`; ICMP responses omit `port`. The parser itself is
+  protocol-agnostic: it normalizes whatever hop JSON the binary emits.
 
 Trace-internal outcomes are always HTTP 200 with a terminal node status
 (`completed`, `failed`, `timed_out`, `cancelled`) and a stable error code
@@ -222,8 +276,9 @@ Trace-internal outcomes are always HTTP 200 with a terminal node status
 
 ## 6. Linux capabilities
 
-NextTrace needs raw ICMP sockets, which requires `CAP_NET_RAW`; a normal
-unprivileged process lacks it. Grant the capability to the **binary**, not to
+NextTrace needs raw sockets, which requires `CAP_NET_RAW`; a normal
+unprivileged process lacks it. This applies to ICMP probes, TCP SYN probes and
+UDP probes (raw-socket ICMP error feedback). Grant the capability to the **binary**, not to
 the Agent:
 
 ```bash
@@ -309,8 +364,9 @@ vendor or modify NextTrace:
 The deterministic fake in `internal/nexttrace/testdata/fake/main.go` stands in
 for the real binary in tests. It records argv and environment, and can emit
 configurable JSON, stderr, exit codes, delays, oversized output and even spawn
-a child process to verify process-group cleanup. No test performs real network
-traceroute or requires NextTrace to be installed.
+a child process to verify process-group cleanup. Its default help advertises
+the ICMP, TCP/UDP and port flags; tests also cover ICMP-only binaries. No test
+performs real network traceroute or requires NextTrace to be installed.
 
 Run the focused suites:
 

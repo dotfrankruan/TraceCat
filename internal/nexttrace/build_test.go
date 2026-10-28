@@ -3,6 +3,7 @@ package nexttrace
 import (
 	"net/netip"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -52,6 +53,52 @@ func TestBuildArgsExactVectors(t *testing.T) {
 				MaxHops: 30, Queries: 3, ProbeTimeoutMS: 1000,
 			},
 			want: []string{"-6", "--json", "-q", "3", "-m", "30", "--timeout", "1000", "2606:4700:4700::1111"},
+		},
+		{
+			name: "ipv4 tcp with destination port",
+			flags: Flags{
+				JSON: true, IPv4: true, IPv6: true,
+				MaxHopsShort: true, QueriesShort: true, Timeout: true,
+				TCPShort: true, UDPShort: true, PortShort: true,
+			},
+			spec: tcpSpec(),
+			want: []string{"-4", "-T", "--json", "-q", "3", "-m", "30", "--timeout", "1000", "-p", "443", "1.1.1.1"},
+		},
+		{
+			name: "ipv4 udp with destination port and traceroute",
+			flags: Flags{
+				JSON: true, IPv4: true, IPv6: true,
+				MaxHopsShort: true, QueriesShort: true, Timeout: true,
+				TCPShort: true, UDPShort: true, PortShort: true, Traceroute: true,
+			},
+			spec: udpSpec(),
+			want: []string{"-4", "-U", "--traceroute", "--json", "-q", "3", "-m", "30", "--timeout", "1000", "-p", "33494", "1.1.1.1"},
+		},
+		{
+			name: "ipv6 udp with destination port",
+			flags: Flags{
+				JSON: true, IPv4: true, IPv6: true,
+				MaxHopsShort: true, QueriesShort: true, Timeout: true,
+				TCPShort: true, UDPShort: true, PortShort: true,
+			},
+			spec: Spec{
+				Addr: v6, Family: model.FamilyIPv6, Protocol: model.ProtocolUDP,
+				Port: intPtr(model.DefaultUDPPort), MaxHops: 30, Queries: 3, ProbeTimeoutMS: 1000,
+			},
+			want: []string{"-6", "-U", "--json", "-q", "3", "-m", "30", "--timeout", "1000", "-p", "33494", "2606:4700:4700::1111"},
+		},
+		{
+			name: "ipv6 tcp with long flag spellings",
+			flags: Flags{
+				JSON: true, IPv4Long: true, IPv6Long: true,
+				MaxHopsLong: true, QueriesLong: true, Timeout: true,
+				TCPLong: true, UDPLong: true, PortLong: true,
+			},
+			spec: Spec{
+				Addr: v6, Family: model.FamilyIPv6, Protocol: model.ProtocolTCP,
+				Port: intPtr(80), MaxHops: 16, Queries: 2, ProbeTimeoutMS: 500,
+			},
+			want: []string{"--ipv6", "--tcp", "--json", "--queries", "2", "--max-hops", "16", "--timeout", "500", "--port", "80", "2606:4700:4700::1111"},
 		},
 		{
 			name: "no timeout capability",
@@ -135,7 +182,7 @@ func TestBuildArgsRejectsInvalidSpecs(t *testing.T) {
 		"zero address":          mutated(func(s *Spec) { s.Addr = netip.Addr{} }),
 		"unmapped mapped addr":  mutated(func(s *Spec) { s.Addr = netip.MustParseAddr("::ffff:1.1.1.1") }),
 		"family mismatch":       mutated(func(s *Spec) { s.Family = model.FamilyIPv6 }),
-		"unsupported protocol":  mutated(func(s *Spec) { s.Protocol = "udp" }),
+		"unsupported protocol":  mutated(func(s *Spec) { s.Protocol = "sctp" }),
 		"max hops zero":         mutated(func(s *Spec) { s.MaxHops = 0 }),
 		"max hops too large":    mutated(func(s *Spec) { s.MaxHops = 65 }),
 		"queries zero":          mutated(func(s *Spec) { s.Queries = 0 }),
@@ -155,6 +202,114 @@ func TestBuildArgsRejectsInvalidSpecs(t *testing.T) {
 
 	if _, err := (Capabilities{}).BuildArgs(valid); err == nil {
 		t.Fatal("BuildArgs with unavailable capabilities = nil error, want rejection")
+	}
+}
+
+func TestBuildArgsProtocolPortRejections(t *testing.T) {
+	t.Parallel()
+
+	fullFlags := Flags{
+		JSON: true, IPv4: true, IPv6: true,
+		MaxHopsShort: true, QueriesShort: true, Timeout: true,
+		TCPShort: true, UDPShort: true, PortShort: true,
+	}
+	fullCaps := Capabilities{Version: "v1.7.3", Flags: fullFlags}
+
+	tcpNoPort := tcpSpec()
+	tcpNoPort.Port = nil
+	udpNoPort := udpSpec()
+	udpNoPort.Port = nil
+	tcpZero := tcpSpec()
+	tcpZero.Port = intPtr(0)
+	tcpTooHigh := tcpSpec()
+	tcpTooHigh.Port = intPtr(65536)
+	icmpWithPort := ipv4Spec()
+	icmpWithPort.Port = intPtr(443)
+
+	cases := map[string]Spec{
+		"tcp missing port":   tcpNoPort,
+		"udp missing port":   udpNoPort,
+		"tcp port zero":      tcpZero,
+		"tcp port above max": tcpTooHigh,
+		"port on icmp":       icmpWithPort,
+	}
+	for name, spec := range cases {
+		spec := spec
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := fullCaps.BuildArgs(spec); err == nil {
+				t.Fatalf("BuildArgs(%+v) = nil error, want rejection", spec)
+			}
+		})
+	}
+
+	t.Run("tcp unsupported by binary", func(t *testing.T) {
+		t.Parallel()
+		caps := Capabilities{Version: "v1.7.3", Flags: Flags{
+			JSON: true, IPv4: true, IPv6: true,
+			MaxHopsShort: true, QueriesShort: true, Timeout: true,
+		}}
+		if _, err := caps.BuildArgs(tcpSpec()); err == nil {
+			t.Fatal("BuildArgs(tcp) = nil error for an ICMP-only binary")
+		}
+	})
+
+	t.Run("tcp without port capability", func(t *testing.T) {
+		t.Parallel()
+		caps := Capabilities{Version: "v1.7.3", Flags: Flags{
+			JSON: true, IPv4: true, IPv6: true,
+			MaxHopsShort: true, QueriesShort: true, Timeout: true,
+			TCPShort: true, UDPShort: true,
+		}}
+		if _, err := caps.BuildArgs(tcpSpec()); err == nil {
+			t.Fatal("BuildArgs(tcp) = nil error without a destination-port flag")
+		}
+	})
+}
+
+func TestBuildArgsPortBoundaries(t *testing.T) {
+	t.Parallel()
+	caps := capableCapabilities()
+	for _, port := range []int{model.MinPort, model.DefaultTCPPort, model.MaxPort} {
+		spec := tcpSpec()
+		spec.Port = intPtr(port)
+		argv, err := caps.BuildArgs(spec)
+		if err != nil {
+			t.Fatalf("BuildArgs(port=%d): %v", port, err)
+		}
+		if got := argv[len(argv)-2]; got != strconv.Itoa(port) {
+			t.Fatalf("port argument = %q, want %d (argv %v)", got, port, argv)
+		}
+		if argv[len(argv)-1] != spec.Addr.String() {
+			t.Fatalf("target is not last: %v", argv)
+		}
+	}
+}
+
+func TestBuildArgsICMPNeverCarriesPort(t *testing.T) {
+	t.Parallel()
+	caps := capableCapabilities()
+	for _, family := range []model.IPFamily{model.FamilyIPv4, model.FamilyIPv6} {
+		addr := mustAddr("1.1.1.1")
+		if family == model.FamilyIPv6 {
+			addr = mustAddr("2606:4700:4700::1111")
+		}
+		spec := Spec{
+			Addr: addr, Family: family, Protocol: model.ProtocolICMP,
+			MaxHops: 30, Queries: 3, ProbeTimeoutMS: 1000,
+		}
+		argv, err := caps.BuildArgs(spec)
+		if err != nil {
+			t.Fatalf("BuildArgs(%s): %v", family, err)
+		}
+		for _, arg := range argv {
+			if arg == "-p" || arg == "--port" {
+				t.Fatalf("icmp argv contains a port flag: %v", argv)
+			}
+		}
+		if spec.Port != nil {
+			t.Fatal("test setup error: ICMP spec carries a port")
+		}
 	}
 }
 

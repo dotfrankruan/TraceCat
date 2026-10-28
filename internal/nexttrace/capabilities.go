@@ -44,6 +44,9 @@ const (
 	CapabilityQueries    = "queries"
 	CapabilityTimeout    = "timeout"
 	CapabilityTraceroute = "traceroute"
+	CapabilityTCP        = "tcp"
+	CapabilityUDP        = "udp"
+	CapabilityPort       = "port"
 )
 
 // Flags records which command-line flags were actually observed in the
@@ -66,6 +69,16 @@ type Flags struct {
 
 	Timeout    bool
 	Traceroute bool
+
+	// TCP/UDP probe flags and the destination-port flag. They are optional:
+	// a binary without them remains usable for ICMP, but the corresponding
+	// protocol is not advertised as effective by the Agent.
+	TCPShort  bool
+	TCPLong   bool
+	UDPShort  bool
+	UDPLong   bool
+	PortShort bool
+	PortLong  bool
 }
 
 func (f Flags) familyFlag(family model.IPFamily) (string, bool) {
@@ -93,6 +106,54 @@ func (f Flags) maxHopsFlag() (string, bool) {
 		return "-m", true
 	case f.MaxHopsLong:
 		return "--max-hops", true
+	default:
+		return "", false
+	}
+}
+
+func (f Flags) tcpFlag() (string, bool) {
+	switch {
+	case f.TCPShort:
+		return "-T", true
+	case f.TCPLong:
+		return "--tcp", true
+	default:
+		return "", false
+	}
+}
+
+func (f Flags) udpFlag() (string, bool) {
+	switch {
+	case f.UDPShort:
+		return "-U", true
+	case f.UDPLong:
+		return "--udp", true
+	default:
+		return "", false
+	}
+}
+
+func (f Flags) portFlag() (string, bool) {
+	switch {
+	case f.PortShort:
+		return "-p", true
+	case f.PortLong:
+		return "--port", true
+	default:
+		return "", false
+	}
+}
+
+// protocolFlag returns the flag that selects protocol p. ICMP is NextTrace's
+// default mode and intentionally has no protocol flag.
+func (f Flags) protocolFlag(protocol model.Protocol) (string, bool) {
+	switch protocol {
+	case model.ProtocolICMP:
+		return "", true
+	case model.ProtocolTCP:
+		return f.tcpFlag()
+	case model.ProtocolUDP:
+		return f.udpFlag()
 	default:
 		return "", false
 	}
@@ -129,6 +190,42 @@ type Capabilities struct {
 // used to run traces.
 func (c Capabilities) Available() bool { return c.Flags.required() }
 
+// SupportsProtocol reports whether the binary can execute protocol p safely
+// with the flags TraceCat needs. ICMP needs only the required base flags; TCP
+// and UDP additionally need both their protocol flag and the destination-port
+// flag so the Agent can always append a validated `-p <port>`.
+func (c Capabilities) SupportsProtocol(protocol model.Protocol) bool {
+	if !c.Available() {
+		return false
+	}
+	switch protocol {
+	case model.ProtocolICMP:
+		return true
+	case model.ProtocolTCP:
+		_, hasTCP := c.Flags.tcpFlag()
+		_, hasPort := c.Flags.portFlag()
+		return hasTCP && hasPort
+	case model.ProtocolUDP:
+		_, hasUDP := c.Flags.udpFlag()
+		_, hasPort := c.Flags.portFlag()
+		return hasUDP && hasPort
+	default:
+		return false
+	}
+}
+
+// SupportedProtocols returns the protocols the binary itself can execute, in
+// the canonical icmp/tcp/udp order.
+func (c Capabilities) SupportedProtocols() []model.Protocol {
+	protocols := make([]model.Protocol, 0, 3)
+	for _, protocol := range []model.Protocol{model.ProtocolICMP, model.ProtocolTCP, model.ProtocolUDP} {
+		if c.SupportsProtocol(protocol) {
+			protocols = append(protocols, protocol)
+		}
+	}
+	return protocols
+}
+
 // CapabilityNames returns the detected capability identifiers in a stable
 // (sorted) order. It includes what was detected even when the binary is not
 // usable, so operators can see why it was rejected.
@@ -154,6 +251,15 @@ func (c Capabilities) CapabilityNames() []string {
 	}
 	if c.Flags.Traceroute {
 		names = append(names, CapabilityTraceroute)
+	}
+	if _, ok := c.Flags.tcpFlag(); ok {
+		names = append(names, CapabilityTCP)
+	}
+	if _, ok := c.Flags.udpFlag(); ok {
+		names = append(names, CapabilityUDP)
+	}
+	if _, ok := c.Flags.portFlag(); ok {
+		names = append(names, CapabilityPort)
 	}
 	sort.Strings(names)
 	return names
@@ -243,6 +349,12 @@ func parseFlags(help string) Flags {
 		QueriesLong:  found["--queries"],
 		Timeout:      found["--timeout"],
 		Traceroute:   found["--traceroute"],
+		TCPShort:     found["-T"],
+		TCPLong:      found["--tcp"],
+		UDPShort:     found["-U"],
+		UDPLong:      found["--udp"],
+		PortShort:    found["-p"],
+		PortLong:     found["--port"],
 	}
 }
 

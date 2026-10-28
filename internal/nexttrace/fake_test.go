@@ -164,6 +164,12 @@ func capableFlags() Flags {
 		QueriesLong:  true,
 		Timeout:      true,
 		Traceroute:   true,
+		TCPShort:     true,
+		TCPLong:      true,
+		UDPShort:     true,
+		UDPLong:      true,
+		PortShort:    true,
+		PortLong:     true,
 	}
 }
 
@@ -181,4 +187,37 @@ func ipv4Spec() Spec {
 		Queries:        3,
 		ProbeTimeoutMS: 1000,
 	}
+}
+
+func intPtr(value int) *int { return &value }
+
+func tcpSpec() Spec {
+	spec := ipv4Spec()
+	spec.Protocol = model.ProtocolTCP
+	spec.Port = intPtr(443)
+	return spec
+}
+
+func udpSpec() Spec {
+	spec := ipv4Spec()
+	spec.Protocol = model.ProtocolUDP
+	spec.Port = intPtr(model.DefaultUDPPort)
+	return spec
+}
+
+// flagsWithoutTCP models an older NextTrace build that only supports ICMP.
+func flagsWithoutTCP() Flags {
+	return Flags{
+		JSON: true, IPv4: true, IPv6: true,
+		MaxHopsShort: true, QueriesShort: true, Timeout: true,
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

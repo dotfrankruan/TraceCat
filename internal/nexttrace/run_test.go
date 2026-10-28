@@ -58,6 +58,20 @@ func TestRunExecutesExactArgv(t *testing.T) {
 	}
 }
 
+func TestRunExecutesTCPArgv(t *testing.T) {
+	fake := newFake(t, fakeControl{Stdout: groupedFixture})
+	runner := NewRunner(fake, capableCapabilities())
+
+	if _, apiErr := runner.Run(context.Background(), tcpSpec(), 5*time.Second, RunLimits{}); apiErr != nil {
+		t.Fatalf("Run: %v", apiErr)
+	}
+	record := readRecord(t, fake+".args")
+	want := []string{"-4", "-T", "--traceroute", "--json", "-q", "3", "-m", "30", "--timeout", "1000", "-p", "443", "1.1.1.1"}
+	if strings.Join(record.Args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("argv = %v, want %v", record.Args, want)
+	}
+}
+
 func TestRunDoesNotInheritSecrets(t *testing.T) {
 	t.Setenv("TRACECAT_AGENT_TOKEN", "do-not-leak-this-token")
 	fake := newFake(t, fakeControl{Stdout: groupedFixture})

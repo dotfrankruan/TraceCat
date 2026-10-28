@@ -25,8 +25,12 @@ type Spec struct {
 	Addr netip.Addr
 	// Family must match Addr.
 	Family model.IPFamily
-	// Protocol is restricted to the protocols the MVP supports.
+	// Protocol is one of the fixed TraceCat protocols. ICMP is the default
+	// probe mode; TCP and UDP require Port.
 	Protocol model.Protocol
+	// Port is the destination port for TCP/UDP probes. It must be nil for
+	// ICMP and is always a bounded integer (model.ValidatePortForProtocol).
+	Port *int
 	// MaxHops is the maximum TTL to probe.
 	MaxHops int
 	// Queries is the number of probes per TTL.
@@ -40,7 +44,11 @@ type Spec struct {
 //
 // The argument vector is deterministic and follows this shape:
 //
-//	<family> [--traceroute] --json <queries-flag> <queries> <max-hops-flag> <max-hops> [--timeout <ms>] <target>
+//	<family> [<protocol-flag>] [--traceroute] --json <queries-flag> <queries> <max-hops-flag> <max-hops> [--timeout <ms>] [-p <port>] <target>
+//
+// ICMP has no protocol flag (it is NextTrace's default). TCP maps to the
+// detected -T/--tcp flag, UDP to -U/--udp, and both additionally require the
+// detected port flag so a validated destination port is always supplied.
 //
 // The target is always the last argument and is the canonical string form of
 // the normalized address. After construction the vector is checked against the
@@ -61,8 +69,14 @@ func (c Capabilities) BuildArgs(spec Spec) ([]string, error) {
 	if spec.Family != model.FamilyOf(addr) {
 		return nil, fmt.Errorf("target family does not match the address")
 	}
-	if spec.Protocol != model.ProtocolICMP {
+	if !spec.Protocol.Valid() {
 		return nil, fmt.Errorf("unsupported probe protocol")
+	}
+	if err := model.ValidatePortForProtocol(spec.Protocol, spec.Port); err != nil {
+		return nil, fmt.Errorf("invalid protocol/port combination")
+	}
+	if !c.SupportsProtocol(spec.Protocol) {
+		return nil, fmt.Errorf("nexttrace does not support the requested protocol")
 	}
 	if spec.MaxHops < model.MinMaxHops || spec.MaxHops > model.MaxMaxHops {
 		return nil, fmt.Errorf("max hops is out of range")
@@ -87,9 +101,16 @@ func (c Capabilities) BuildArgs(spec Spec) ([]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("nexttrace does not support a family flag")
 	}
+	protocolFlag, ok := c.Flags.protocolFlag(spec.Protocol)
+	if !ok {
+		return nil, fmt.Errorf("nexttrace does not support the requested protocol flag")
+	}
 
-	args := make([]string, 0, 10)
+	args := make([]string, 0, 13)
 	args = append(args, familyFlag)
+	if protocolFlag != "" {
+		args = append(args, protocolFlag)
+	}
 	if c.Flags.Traceroute {
 		args = append(args, "--traceroute")
 	}
@@ -98,6 +119,13 @@ func (c Capabilities) BuildArgs(spec Spec) ([]string, error) {
 	args = append(args, maxHopsFlag, strconv.Itoa(spec.MaxHops))
 	if c.Flags.Timeout {
 		args = append(args, "--timeout", strconv.Itoa(spec.ProbeTimeoutMS))
+	}
+	if spec.Protocol.RequiresPort() {
+		portFlag, ok := c.Flags.portFlag()
+		if !ok {
+			return nil, fmt.Errorf("nexttrace does not support a destination-port flag")
+		}
+		args = append(args, portFlag, strconv.Itoa(*spec.Port))
 	}
 	args = append(args, addr.String())
 
@@ -123,12 +151,36 @@ func assertArgv(c Capabilities, spec Spec, argv []string, addr netip.Addr) error
 		"--max-hops":                      true,
 		"-q":                              true,
 		"--queries":                       true,
+		"-T":                              true,
+		"--tcp":                           true,
+		"-U":                              true,
+		"--udp":                           true,
+		"-p":                              true,
+		"--port":                          true,
 		strconv.Itoa(spec.MaxHops):        true,
 		strconv.Itoa(spec.Queries):        true,
 		strconv.Itoa(spec.ProbeTimeoutMS): true,
 	}
+	if spec.Port != nil {
+		allowed[strconv.Itoa(*spec.Port)] = true
+	}
 	if len(argv) == 0 {
 		return fmt.Errorf("empty argument vector")
+	}
+	familyFlag, ok := c.Flags.familyFlag(spec.Family)
+	if !ok || argv[0] != familyFlag {
+		return fmt.Errorf("argument vector does not start with the expected family flag")
+	}
+	protocolFlag, ok := c.Flags.protocolFlag(spec.Protocol)
+	if !ok {
+		return fmt.Errorf("protocol flag was not detected")
+	}
+	if protocolFlag == "" {
+		if len(argv) < 2 || argv[1] == "-T" || argv[1] == "--tcp" || argv[1] == "-U" || argv[1] == "--udp" {
+			return fmt.Errorf("icmp argument vector must not carry a protocol flag")
+		}
+	} else if len(argv) < 2 || argv[1] != protocolFlag {
+		return fmt.Errorf("argument vector does not carry the expected protocol flag")
 	}
 	if target := argv[len(argv)-1]; target != addr.String() {
 		return fmt.Errorf("target must be the final argument and must equal the normalized address")
@@ -152,6 +204,18 @@ func assertArgv(c Capabilities, spec Spec, argv []string, addr netip.Addr) error
 	}
 	if !c.Flags.Timeout && containsArg(argv, "--timeout") {
 		return fmt.Errorf("timeout flag was not detected")
+	}
+	if spec.Protocol.RequiresPort() {
+		portFlag, ok := c.Flags.portFlag()
+		if !ok || spec.Port == nil {
+			return fmt.Errorf("tcp/udp probe is missing its destination port")
+		}
+		// The port pair is immediately before the target.
+		if len(argv) < 3 || argv[len(argv)-3] != portFlag || argv[len(argv)-2] != strconv.Itoa(*spec.Port) {
+			return fmt.Errorf("tcp/udp probe does not carry the expected destination port pair")
+		}
+	} else if containsArg(argv, "-p") || containsArg(argv, "--port") {
+		return fmt.Errorf("icmp probe must not carry a destination port")
 	}
 	return nil
 }

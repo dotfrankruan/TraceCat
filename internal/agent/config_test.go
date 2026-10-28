@@ -90,6 +90,10 @@ func TestLoadValidConfigAppliesDefaults(t *testing.T) {
 	if cfg.NextTrace.MaxRawBytes != 1<<20 {
 		t.Fatalf("max_raw_bytes = %d, want 1 MiB", cfg.NextTrace.MaxRawBytes)
 	}
+	wantProtocols := []string{"icmp", "tcp", "udp"}
+	if strings.Join(cfg.NextTrace.AllowedProtocols, ",") != strings.Join(wantProtocols, ",") {
+		t.Fatalf("allowed_protocols = %v, want %v", cfg.NextTrace.AllowedProtocols, wantProtocols)
+	}
 	if cfg.RateLimit.RequestsPerMinute != 60 || cfg.RateLimit.Burst != 10 || cfg.RateLimit.MaxConcurrentHTTP != 16 {
 		t.Fatalf("rate_limit defaults = %+v", cfg.RateLimit)
 	}
@@ -116,6 +120,62 @@ func TestLoadRequiresTailscaleBindByDefault(t *testing.T) {
 	if !strings.Contains(strings.ToLower(err.Error()), "tailscale") {
 		t.Fatalf("error %q should mention the Tailscale requirement", err)
 	}
+}
+
+func TestLoadAllowedProtocols(t *testing.T) {
+	fake := newFakeNexttrace(t, fakeControl{})
+	t.Setenv(testTokenEnv, testToken)
+
+	t.Run("custom subset is normalized", func(t *testing.T) {
+		cfg, err := loadConfigWith(t, fake, func(m map[string]any) {
+			m["nexttrace"] = map[string]any{
+				"binary":            fake,
+				"allowed_protocols": []string{"TCP", " icmp "},
+			}
+		})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if strings.Join(cfg.NextTrace.AllowedProtocols, ",") != "TCP, icmp " {
+			t.Fatalf("allowed_protocols = %v, want raw configured values", cfg.NextTrace.AllowedProtocols)
+		}
+	})
+
+	t.Run("duplicates rejected", func(t *testing.T) {
+		_, err := loadConfigWith(t, fake, func(m map[string]any) {
+			m["nexttrace"] = map[string]any{
+				"binary":            fake,
+				"allowed_protocols": []string{"icmp", "icmp"},
+			}
+		})
+		if err == nil || !strings.Contains(err.Error(), "duplicate") {
+			t.Fatalf("Load error = %v, want duplicate rejection", err)
+		}
+	})
+
+	t.Run("invalid protocol rejected", func(t *testing.T) {
+		_, err := loadConfigWith(t, fake, func(m map[string]any) {
+			m["nexttrace"] = map[string]any{
+				"binary":            fake,
+				"allowed_protocols": []string{"icmp", "sctp"},
+			}
+		})
+		if err == nil || !strings.Contains(err.Error(), "unsupported protocol") {
+			t.Fatalf("Load error = %v, want unsupported protocol rejection", err)
+		}
+	})
+
+	t.Run("empty list rejected", func(t *testing.T) {
+		_, err := loadConfigWith(t, fake, func(m map[string]any) {
+			m["nexttrace"] = map[string]any{
+				"binary":            fake,
+				"allowed_protocols": []string{},
+			}
+		})
+		if err == nil || !strings.Contains(err.Error(), "at least one protocol") {
+			t.Fatalf("Load error = %v, want empty allowlist rejection", err)
+		}
+	})
 }
 
 func TestLoadRejectsUnknownAndTrailingData(t *testing.T) {

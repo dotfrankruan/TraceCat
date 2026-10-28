@@ -39,16 +39,11 @@ mkdir -p dist stage
 for arch in "${ARCHES[@]}"; do
   echo "==> linux/${arch}"
   for component in controller agent; do
-    CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-      go build -trimpath -ldflags "$ldflags" \
-      -o "dist/tracecat-${component}-linux-${arch}" "./cmd/tracecat-${component}"
-  done
-  rm -f "dist/tracecat-controller-linux-${arch}" "dist/tracecat-agent-linux-${arch}"
-
-  for component in controller agent; do
     stage_dir="stage/${component}-${arch}"
     mkdir -p "$stage_dir"/{bin,configs,deploy/systemd}
-    cp "dist/tracecat-${component}-linux-${arch}" "$stage_dir/bin/tracecat-${component}"
+    CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+      go build -trimpath -ldflags "$ldflags" \
+      -o "$stage_dir/bin/tracecat-${component}" "./cmd/tracecat-${component}"
     cp "configs/${component}.example.json" "$stage_dir/configs/"
     cp "deploy/systemd/tracecat-${component}.service" \
        "deploy/systemd/tracecat-${component}.env.example" "$stage_dir/deploy/systemd/"

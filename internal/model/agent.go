@@ -63,6 +63,7 @@ type AgentTraceResponse struct {
 	TargetIP         string       `json:"target_ip"`
 	Family           IPFamily     `json:"family"`
 	Protocol         Protocol     `json:"protocol"`
+	Port             *int         `json:"port,omitempty"`
 	StartedAt        string       `json:"started_at"`
 	EndedAt          string       `json:"ended_at"`
 	DurationMS       int64        `json:"duration_ms"`

@@ -103,6 +103,7 @@ type Job struct {
 	OriginalTarget string       `json:"original_target"`
 	Family         IPFamily     `json:"family"`
 	Protocol       Protocol     `json:"protocol"`
+	Port           *int         `json:"port,omitempty"`
 	MaxHops        int          `json:"max_hops"`
 	Queries        int          `json:"queries"`
 	TimeoutMS      int          `json:"timeout_ms"`
@@ -160,6 +161,8 @@ type JobListItem struct {
 	TargetIP       string     `json:"target_ip"`
 	OriginalTarget string     `json:"original_target"`
 	Family         IPFamily   `json:"family"`
+	Protocol       Protocol   `json:"protocol"`
+	Port           *int       `json:"port,omitempty"`
 	CreatedAt      string     `json:"created_at"`
 	EndedAt        string     `json:"ended_at,omitempty"`
 	Summary        JobSummary `json:"summary"`

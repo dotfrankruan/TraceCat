@@ -191,14 +191,42 @@ func helpFlagSet(help string) map[string]bool {
 		if trimmed == "" || !strings.HasPrefix(trimmed, "-") {
 			continue
 		}
-		if idx := strings.Index(trimmed, "  "); idx >= 0 {
-			trimmed = trimmed[:idx]
-		}
+		trimmed = flagDefinitionPrefix(trimmed)
 		for _, token := range strings.Fields(strings.NewReplacer(",", " ", "=", " ").Replace(trimmed)) {
 			found[token] = true
 		}
 	}
 	return found
+}
+
+// flagDefinitionPrefix returns the flag-definition part of one help line.
+// Real NextTrace (pflag) help separates a short flag from its long alias with
+// two spaces too, for example:
+//
+//	-j  --json                         Output trace results as JSON
+//
+// so a run of two or more spaces only terminates the definition when the text
+// after it does not start with another flag. This keeps both "-j" and
+// "--json" detectable while still discarding the description column.
+func flagDefinitionPrefix(line string) string {
+	for i := 0; i < len(line); {
+		if line[i] != ' ' {
+			i++
+			continue
+		}
+		j := i
+		for j < len(line) && line[j] == ' ' {
+			j++
+		}
+		if j-i >= 2 {
+			rest := strings.TrimSpace(line[j:])
+			if rest == "" || !strings.HasPrefix(rest, "-") {
+				return strings.TrimSpace(line[:i])
+			}
+		}
+		i = j
+	}
+	return strings.TrimSpace(line)
 }
 
 func parseFlags(help string) Flags {

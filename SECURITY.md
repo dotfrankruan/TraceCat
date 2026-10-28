@@ -266,6 +266,8 @@ See `docs/TESTING.md` for the exact commands and the verified test matrix.
 
 1. Run Agents unprivileged, grant only `CAP_NET_RAW` (ambient capability or
    `setcap cap_net_raw+ep` on the NextTrace binary), keep systemd sandboxing on.
+   The Agent unit intentionally omits `MemoryDenyWriteExecute` because NextTrace
+   v1.7.3 crashes under W^X; do not re-add it to the Agent unit.
 2. Bind Agents only to the Tailscale address; restrict reachability with
    tailnet ACLs to the Controller tag and the Agent port.
 3. Use a distinct random bearer token per Agent, 0600 env files, and rotate.

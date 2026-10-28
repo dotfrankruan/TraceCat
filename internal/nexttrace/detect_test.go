@@ -99,6 +99,67 @@ func TestParseFlags(t *testing.T) {
 	}
 }
 
+// realNextTraceHelp is a trimmed excerpt of NextTrace v1.7.3's --help output.
+// It uses the pflag layout where a short flag and its long alias are separated
+// by two spaces, the same width used before the description column. This layout
+// previously defeated capability detection (JSON was reported unsupported) and
+// left real Agents degraded.
+const realNextTraceHelp = `usage: nexttrace [-h|--help] [-4|--ipv4] [-6|--ipv6]
+                 [--mtu] [-T|--tcp] [-U|--udp] [TARGET "<value>"]
+
+                 An open source visual route tracking CLI tool
+
+Arguments:
+
+  -4  --ipv4                         Use IPv4 only
+  -6  --ipv6                         Use IPv6 only
+  -m  --max-hops                     Set the max number of hops (max TTL to be
+                                     reached). Default: 30
+  -q  --queries                      Latency samples per hop. Increase to 5-10
+                                     on unstable paths for a steadier view.
+                                     Default: 3
+  -j  --json                         Output trace results as JSON
+  -C  --no-color                     Disable Colorful Output (traceroute mode
+                                     is implied; --traceroute is not a flag)
+      --timeout                      Per-probe timeout [ms]. Default: 1000
+`
+
+func TestParseFlagsRealNextTraceHelp(t *testing.T) {
+	t.Parallel()
+	flags := parseFlags(realNextTraceHelp)
+	if !flags.required() {
+		t.Fatalf("real NextTrace v1.7.3 help must satisfy required flags, got %+v", flags)
+	}
+	if !flags.JSON {
+		t.Error("--json was not detected in real NextTrace help")
+	}
+	if !flags.IPv4 || !flags.IPv6 {
+		t.Errorf("family flags not detected: ipv4=%v ipv6=%v", flags.IPv4, flags.IPv6)
+	}
+	if !flags.MaxHopsShort || !flags.QueriesShort || !flags.Timeout {
+		t.Errorf("numeric flags not detected: %+v", flags)
+	}
+	// "--traceroute" appears only inside a description in this excerpt, so it
+	// must not be treated as a supported flag.
+	if flags.Traceroute {
+		t.Error("--traceroute mentioned only in a description was treated as supported")
+	}
+}
+
+func TestDetectRealNextTraceHelp(t *testing.T) {
+	fake := newFake(t, fakeControl{Version: "NextTrace v1.7.3 2026-08-23T16:13:15Z\n", Help: realNextTraceHelp})
+	caps, apiErr := Detect(context.Background(), fake)
+	if apiErr != nil {
+		t.Fatalf("Detect: %v", apiErr)
+	}
+	if !caps.Available() {
+		t.Fatal("caps should be available for the real v1.7.3 help layout")
+	}
+	if caps.Version != "v1.7.3" {
+		t.Fatalf("version = %q, want v1.7.3", caps.Version)
+	}
+}
+
 const defaultHelpForTest = `Usage:
   nexttrace [flags] <target>
 

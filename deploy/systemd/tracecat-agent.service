@@ -45,7 +45,10 @@ RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
+# Do NOT set MemoryDenyWriteExecute=true for the Agent: the real NextTrace
+# binary (verified v1.7.3 on Debian 13) SIGSEGVs under a W^X memory policy.
+# The Controller unit keeps MemoryDenyWriteExecute because it never execs
+# nexttrace. Keep the remaining sandbox directives.
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM

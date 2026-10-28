@@ -27,7 +27,7 @@ pnpm --dir web build
 | Layer | Location | What it proves |
 | --- | --- | --- |
 | Destination policy | `internal/ipguard` | default-deny classes, IPv4-mapped bypass, admin allowlist, invalid input/zone/brackets, Tailscale range classification |
-| NextTrace command/parser | `internal/nexttrace` | capability detection, exact argv, no-shell execution, process-group timeout/cancel, stdout/stderr caps, schema variants, metadata sanitization, raw retention |
+| NextTrace command/parser | `internal/nexttrace` | capability detection against both comma-style and real pflag-style help output (`-j  --json`), exact argv, no-shell execution, process-group timeout/cancel, stdout/stderr caps, schema variants, metadata sanitization, raw retention |
 | Agent HTTP | `internal/agent` | bearer auth, strict JSON, body limits, target revalidation, rate limit, concurrency, status/error mapping, health, config validation |
 | Controller | `internal/controller` | DNS (A/AAAA, IDN, failures, limits), Access JWT verification, local sessions/CSRF, job dispatch/partial failure/cancel, SSE, SQLite history/trim, security headers, rate limits |
 | Dashboard | `web` | strict TypeScript, production build embedded by `internal/webui` |

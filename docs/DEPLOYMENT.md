@@ -162,6 +162,19 @@ sudo setcap cap_net_raw+ep /usr/local/bin/nexttrace
 Either way, keep the systemd sandbox directives. Do **not** run the Agent as
 root "because it is easier".
 
+> **Note:** the shipped Agent unit intentionally does **not** set
+> `MemoryDenyWriteExecute=true`. NextTrace v1.7.3 SIGSEGVs under a W^X memory
+> policy (verified on Debian 13/systemd 257), so only the Controller unit keeps
+> that directive. Do not re-add it to the Agent.
+
+Verify NextTrace works under the service account before starting the Agent:
+
+```bash
+sudo -u tracecat /usr/local/bin/nexttrace --version   # must print a version
+sudo -u tracecat /usr/local/bin/nexttrace --json -q 1 -m 2 1.1.1.1 | head -c 200
+# If the second command fails with a permission error, fix CAP_NET_RAW (A or B).
+```
+
 ### 2.2 Multiple Agents
 
 Repeat on each vantage point with a different `node_id`, `listen` address/port

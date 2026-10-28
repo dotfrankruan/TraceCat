@@ -382,7 +382,7 @@ write_controller_config() {
     PUBLIC_ORIGIN="${PUBLIC_ORIGIN:-http://$CONTROLLER_LISTEN}"
   fi
   [[ -n "$PUBLIC_ORIGIN" ]] || die "--public-origin is required for auth mode $AUTH_MODE"
-  [[ "$PUBLIC_ORIGIN" =~ ^https?://[A-Za-z0-9._:\-\[\]/]+$ ]] || die "invalid --public-origin"
+  [[ "$PUBLIC_ORIGIN" =~ ^https?://[][A-Za-z0-9._:/-]+/?$ ]] || die "invalid --public-origin"
   valid_simple "$PUBLIC_ORIGIN" "--public-origin"
 
   [[ ${#AGENT_SPECS[@]} -gt 0 ]] || die "at least one --agent id,url,token_env is required"

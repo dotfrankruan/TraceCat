@@ -42,6 +42,31 @@ if [[ "http://10.0.0.5:8443 with space" =~ ^https?://[][A-Za-z0-9._:/-]+/?$ ]]; 
   echo "FAIL: URL with whitespace was accepted"; fail=1
 fi
 
+# Public-origin validation (portable character class, no escaped brackets).
+origin_re='^https?://[][A-Za-z0-9._:/-]+/?$'
+for good in "http://127.0.0.1:18090" "https://trace.example.com" "https://trace.example.com/" "http://[fd7a:115c:a1e0::1]:8080"; do
+  if [[ "$good" =~ $origin_re ]]; then :; else
+    echo "FAIL: public origin rejected: $good"; fail=1
+  fi
+done
+for bad in "trace.example.com" "ftp://trace.example.com" "https://trace.example.com with space" "javascript:alert(1)"; do
+  if [[ "$bad" =~ $origin_re ]]; then
+    echo "FAIL: invalid public origin accepted: $bad"; fail=1
+  fi
+done
+
+# dev-mode loopback listener check (escaped brackets are fine outside classes).
+for good in "127.0.0.1:8080" "[::1]:8080"; do
+  if [[ "$good" =~ ^(127\.0\.0\.1|\[::1\]): ]]; then :; else
+    echo "FAIL: dev loopback listen rejected: $good"; fail=1
+  fi
+done
+for bad in "0.0.0.0:8080" "10.0.0.5:8080"; do
+  if [[ "$bad" =~ ^(127\.0\.0\.1|\[::1\]): ]]; then
+    echo "FAIL: non-loopback dev listen accepted: $bad"; fail=1
+  fi
+done
+
 # Listen validation (IPv4, bracketed IPv6, reject wildcard-less input).
 for good in "10.0.0.5:8443" "127.0.0.1:9481" "[fd7a:115c:a1e0::1]:8443"; do
   if [[ "$good" =~ ^(\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f:.]+):[0-9]{1,5}$ ]]; then :; else

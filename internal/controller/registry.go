@@ -156,7 +156,7 @@ func (r *Registry) checkOne(ctx context.Context, agent *AgentConfig) {
 		current := r.health[agent.ID]
 		current.status = HealthUnreachable
 		r.health[agent.ID] = current
-		r.logger.Warn("agent health check failed", "node_id", agent.ID)
+		r.logger.Warn("agent health check failed", "node_id", agent.ID, "error", err.Error())
 		return
 	}
 	status := HealthOK

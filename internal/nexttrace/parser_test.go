@@ -2,6 +2,7 @@ package nexttrace
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"unicode"
@@ -365,5 +366,50 @@ func TestParseGeoCoordinatesRules(t *testing.T) {
 				t.Fatalf("lat/lng = %v/%v, want 0/0", probe.Lat, probe.Lng)
 			}
 		})
+	}
+}
+
+// TestParseToleratesNonRootBanner covers a real NextTrace v1.7.3 behaviour: as
+// a non-root user it prints a three-line advisory about raw-socket privileges
+// to stdout before the JSON document, even with --json. The banner must be
+// tolerated (and never retained), while the JSON itself is fully validated.
+func TestParseToleratesNonRootBanner(t *testing.T) {
+	t.Parallel()
+	banner, err := os.ReadFile("testdata/nexttrace-v1.7.3-nonroot-advisory.txt")
+	if err != nil {
+		t.Fatalf("read banner fixture: %v", err)
+	}
+	if len(banner) == 0 || !strings.Contains(string(banner), "NextTrace") {
+		t.Fatalf("banner fixture looks wrong (%d bytes)", len(banner))
+	}
+	stdout := append(append([]byte(nil), banner...), []byte(groupedFixture)...)
+
+	parsed, apiErr := Parse(stdout, ParseOptions{TargetIP: "1.1.1.1"})
+	if apiErr != nil {
+		t.Fatalf("Parse with real non-root banner: %v", apiErr)
+	}
+	if len(parsed.Hops) != 2 {
+		t.Fatalf("hop count = %d, want 2", len(parsed.Hops))
+	}
+	if !parsed.Summary.ReachedDestination {
+		t.Fatal("destination should be marked reached")
+	}
+	if !json.Valid(parsed.RawResult) {
+		t.Fatal("retained raw result is not valid JSON")
+	}
+	if strings.Contains(string(parsed.RawResult), "NextTrace") {
+		t.Fatal("tolerated banner leaked into the retained raw result")
+	}
+	if !strings.HasPrefix(string(parsed.RawResult), "{") {
+		t.Fatalf("raw result should start at the JSON document, got %q", parsed.RawResult[:min(20, len(parsed.RawResult))])
+	}
+
+	// A banner followed by truncated JSON must still be a parse_error: a
+	// partial document is never accepted as a successful trace.
+	truncated := append(append([]byte(nil), banner...), []byte(`{"Hops":[[{"TTL":1,"Success":true`)...)
+	if _, apiErr := Parse(truncated, ParseOptions{TargetIP: "1.1.1.1"}); apiErr == nil {
+		t.Fatal("truncated JSON after a banner must return parse_error")
+	} else if apiErr.Code != model.ErrParseError {
+		t.Fatalf("error code = %s, want parse_error", apiErr.Code)
 	}
 }

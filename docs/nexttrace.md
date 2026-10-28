@@ -262,7 +262,27 @@ Notes:
 
 ---
 
-## 7. Licensing: NextTrace is an external GPL-3.0 program
+## 7. Non-root stdout advisory (v1.7.x)
+
+When NextTrace runs as a non-root user it prints a three-line advisory about
+raw-socket privileges to **stdout before the JSON document**, even with
+`--json`; it does not use stderr for this. The advisory is informational and
+does not indicate a failed trace. TraceCat therefore locates the first complete,
+valid JSON document within a bounded prefix (16 KiB, at most 16 candidate
+openings) and parses only that document:
+
+- the banner is never stored, exported, logged as trace data or rendered;
+- the JSON must still be complete and valid, otherwise the trace fails with
+  `parse_error` (a truncated document is never accepted);
+- stdout remains subject to `max_stdout_bytes`.
+
+A regression test uses the exact v1.7.3 advisory bytes
+(`internal/nexttrace/testdata/nexttrace-v1.7.3-nonroot-advisory.txt`) followed by
+a real hop document, plus a banner + truncated JSON negative case.
+
+---
+
+## 8. Licensing: NextTrace is an external GPL-3.0 program
 
 NextTrace (the `nexttrace` binary, from the NTrace-core project) is licensed
 under the **GNU General Public License v3.0**. TraceCat does not embed, link,
@@ -284,7 +304,7 @@ vendor or modify NextTrace:
 
 ---
 
-## 8. Testing this integration
+## 9. Testing this integration
 
 The deterministic fake in `internal/nexttrace/testdata/fake/main.go` stands in
 for the real binary in tests. It records argv and environment, and can emit

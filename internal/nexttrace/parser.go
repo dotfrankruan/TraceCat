@@ -46,19 +46,30 @@ type Parsed struct {
 // grouped output ({"Hops":[[{...}],...]}) and the flat variant
 // ({"Hops":[{...}]}). Unknown and newly added fields are ignored. Structural
 // problems never produce partial results: they return parse_error.
+//
+// NextTrace v1.7.x prints a multi-line advisory about raw-socket privileges to
+// stdout (before the JSON document) whenever it runs as a non-root user, even
+// with --json. The advisory is not an error and the trace JSON after it is
+// valid, so a bounded non-JSON prefix is tolerated: the parser locates the
+// first byte offset whose suffix is a complete, valid JSON value and parses
+// only that. The banner itself is never stored, returned or rendered.
 func Parse(raw []byte, opts ParseOptions) (Parsed, *model.APIError) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return Parsed{}, parseError("nexttrace produced no output")
 	}
-	if !json.Valid(trimmed) {
-		return Parsed{}, parseError("nexttrace output is not valid JSON")
+	document := trimmed
+	if !json.Valid(document) {
+		document = jsonDocumentSuffix(trimmed)
+		if document == nil {
+			return Parsed{}, parseError("nexttrace output is not valid JSON")
+		}
 	}
 
 	var top struct {
 		Hops json.RawMessage `json:"Hops"`
 	}
-	if err := json.Unmarshal(trimmed, &top); err != nil {
+	if err := json.Unmarshal(document, &top); err != nil {
 		return Parsed{}, parseError("nexttrace output has an unexpected structure")
 	}
 	hopsRaw := bytes.TrimSpace(top.Hops)
@@ -79,12 +90,49 @@ func Parse(raw []byte, opts ParseOptions) (Parsed, *model.APIError) {
 	if maxRaw <= 0 {
 		maxRaw = DefaultMaxRawBytes
 	}
-	if len(trimmed) > maxRaw {
+	// Retain only the JSON document: any tolerated NextTrace banner is neither
+	// stored nor exported.
+	if len(document) > maxRaw {
 		result.RawResultTruncated = true
 	} else {
-		result.RawResult = json.RawMessage(append([]byte(nil), trimmed...))
+		result.RawResult = json.RawMessage(append([]byte(nil), document...))
 	}
 	return result, nil
+}
+
+// maxNonJSONPrefixBytes bounds how far the parser will look for the start of
+// the JSON document when NextTrace prints an advisory banner first.
+const (
+	maxNonJSONPrefixBytes = 16 << 10
+	maxJSONCandidates     = 16
+)
+
+// jsonDocumentSuffix returns the shortest suffix of raw that is a complete,
+// valid JSON value, searching only a bounded prefix and a bounded number of
+// candidate opening braces. It returns nil when no valid document is found,
+// which keeps malformed/truncated output a parse_error. A valid JSON *object*
+// is required by the caller's unmarshal; a valid non-object suffix simply fails
+// cleanly there.
+func jsonDocumentSuffix(raw []byte) []byte {
+	limit := len(raw)
+	if limit > maxNonJSONPrefixBytes {
+		limit = maxNonJSONPrefixBytes
+	}
+	candidates := 0
+	for i := 0; i < limit; i++ {
+		if raw[i] != '{' {
+			continue
+		}
+		candidates++
+		if candidates > maxJSONCandidates {
+			return nil
+		}
+		candidate := bytes.TrimSpace(raw[i:])
+		if json.Valid(candidate) {
+			return candidate
+		}
+	}
+	return nil
 }
 
 func parseError(message string) *model.APIError {

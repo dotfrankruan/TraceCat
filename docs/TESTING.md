@@ -30,6 +30,9 @@ pnpm --dir web build
 | NextTrace command/parser | `internal/nexttrace` | capability detection against both comma-style and real pflag-style help output (`-j  --json`), exact argv, no-shell execution, process-group timeout/cancel, stdout/stderr caps, schema variants, metadata sanitization, raw retention |
 | Agent HTTP | `internal/agent` | bearer auth, strict JSON, body limits, target revalidation, rate limit, concurrency, status/error mapping, health, config validation |
 | Controller | `internal/controller` | DNS (A/AAAA, IDN, failures, limits), Access JWT verification, local sessions/CSRF, job dispatch/partial failure/cancel, SSE, SQLite history/trim, security headers, rate limits |
+| Protocols/ports | `internal/nexttrace`, `internal/agent`, `internal/controller` | TCP/UDP capability detection, exact `-T/-U/-p` argv, port validation matrix, per-layer allowlists |
+| Interfaces | `internal/agent`, `internal/controller` | enumeration/filtering/include, health advertisement, per-node `-D` dispatch, rejection matrix |
+| Installer/release | `deploy/install_test.sh`, `verify/installer-remote-verify.sh` | URL/listen/origin parsing, checksum refusal, upgrade-keeps-config, token handling, dev/local auth installs |
 | Dashboard | `web` | strict TypeScript, production build embedded by `internal/webui` |
 
 ## Security test matrix

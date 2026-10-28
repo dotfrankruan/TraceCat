@@ -103,9 +103,18 @@ external NextTrace CLI, with an embedded React dashboard.
   top-level `interfaces.{exclude,include}`. Histories with old configs must be
   updated (strict JSON rejects unknown keys).
 
+### Verification
+
+Independently verified on Debian 13 + systemd + a private overlay with real
+NextTrace v1.7.3. **v0.1.1 delta: 408 PASS / 0 FAIL / 3 informational SKIPs**
+(Agent 174, Controller 155, installer/release 61, headless browser 18/18),
+including real TCP/UDP traces, exact child argv, interface selection, bind
+policy and one-command installer checks. Three installer P1 defects were found
+during the delta and fixed before release (`docs/VERIFICATION.md` §13).
+
 ### Known limitations
 
-See the "Limitations" section of `README.md`: one-shot ICMP only, single-tenant
+See the "Limitations" section of `README.md`: one-shot ICMP/TCP/UDP only, single-tenant
 authorization, no job resumption after a Controller restart, cleartext HTTP
 inside the tailnet, third-party GeoIP accuracy, and in-memory per-instance rate
 limits.

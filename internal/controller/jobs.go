@@ -192,11 +192,12 @@ func (m *Manager) CreateJob(ctx context.Context, principal *Principal, clientIP 
 	for _, nodeID := range plan.nodeIDs {
 		agent, _ := m.registry.Get(nodeID)
 		job.Nodes = append(job.Nodes, model.NodeResult{
-			NodeID:   agent.ID,
-			NodeName: agent.Name,
-			Location: agent.Location,
-			Provider: agent.Provider,
-			Status:   model.NodePending,
+			NodeID:    agent.ID,
+			NodeName:  agent.Name,
+			Location:  agent.Location,
+			Provider:  agent.Provider,
+			Status:    model.NodePending,
+			Interface: plan.interfaces[nodeID],
 		})
 	}
 	job.Summary = model.SummarizeJob(job.Nodes)
@@ -247,6 +248,7 @@ type createPlan struct {
 	protocol       model.Protocol
 	port           *int
 	nodeIDs        []string
+	interfaces     map[string]string
 	originalTarget string
 	maxHops        int
 	queries        int
@@ -319,17 +321,70 @@ func (m *Manager) validateCreateJob(req *model.CreateJobRequest) (*createPlan, *
 		nodeIDs = append(nodeIDs, nodeID)
 	}
 
+	interfaces, apiErr := m.validateNodeInterfaces(req.NodeInterfaces, seen)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+
 	return &createPlan{
 		target:         target,
 		family:         model.FamilyOf(target),
 		protocol:       protocol,
 		port:           clonePort(req.Port),
 		nodeIDs:        nodeIDs,
+		interfaces:     interfaces,
 		originalTarget: validated,
 		maxHops:        req.MaxHops,
 		queries:        req.Queries,
 		timeoutMS:      req.TimeoutMS,
 	}, nil
+}
+
+// validateNodeInterfaces validates the optional per-node interface selection.
+// Keys must be selected node ids; values are either empty (automatic routing)
+// or a syntactically valid name that the Agent actually advertised in its last
+// health check. The returned map is a deep copy containing only explicit
+// selections, so callers can never alias or race on the request map.
+func (m *Manager) validateNodeInterfaces(requested map[string]string, selected map[string]struct{}) (map[string]string, *model.APIError) {
+	if len(requested) == 0 {
+		return nil, nil
+	}
+	interfaces := make(map[string]string, len(requested))
+	for nodeID, name := range requested {
+		if _, ok := selected[nodeID]; !ok {
+			return nil, model.NewError(model.ErrInvalidRequest, "node_interfaces contains a node that is not selected")
+		}
+		if name == "" {
+			// Explicit automatic routing.
+			continue
+		}
+		if err := model.ValidateInterfaceName(name); err != nil {
+			var apiErr *model.APIError
+			if errors.As(err, &apiErr) {
+				return nil, apiErr
+			}
+			return nil, model.NewError(model.ErrInvalidRequest, "invalid interface name")
+		}
+		available := m.registry.Interfaces(nodeID)
+		if !containsString(available, name) {
+			return nil, model.NewError(model.ErrInvalidRequest,
+				"node_interfaces selects an interface that is not available on the selected node")
+		}
+		interfaces[nodeID] = name
+	}
+	if len(interfaces) == 0 {
+		return nil, nil
+	}
+	return interfaces, nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // clonePort copies an optional destination port so job snapshots never alias a
@@ -491,6 +546,10 @@ func (m *Manager) runNode(ctx context.Context, st *jobState, nodeID string) {
 
 	st.mu.Lock()
 	job := st.job
+	nodeInterface := ""
+	if idx, ok := st.nodeIdx[nodeID]; ok && idx >= 0 && idx < len(job.Nodes) {
+		nodeInterface = job.Nodes[idx].Interface
+	}
 	st.mu.Unlock()
 
 	req := &model.AgentTraceRequest{
@@ -501,6 +560,7 @@ func (m *Manager) runNode(ctx context.Context, st *jobState, nodeID string) {
 		Family:        job.Family,
 		Protocol:      job.Protocol,
 		Port:          clonePort(job.Port),
+		Interface:     nodeInterface,
 		MaxHops:       job.MaxHops,
 		Queries:       job.Queries,
 		TimeoutMS:     job.TimeoutMS,
@@ -546,6 +606,7 @@ func (m *Manager) finishNode(st *jobState, nodeID string, status model.NodeStatu
 		node.DurationMS = result.DurationMS
 		node.NextTraceVersion = result.NextTraceVersion
 		node.ParserSchema = result.ParserSchema
+		node.Interface = result.Interface
 	}
 	node.Status = status
 	if started != nil {
@@ -600,11 +661,12 @@ func classifyAgentFailure(err error, ctx context.Context) (model.NodeStatus, *mo
 
 func (m *Manager) buildNodeResult(agent *AgentConfig, resp *model.AgentTraceResponse, targetIP string, started, ended time.Time) (model.NodeResult, json.RawMessage) {
 	result := model.NodeResult{
-		NodeID:   agent.ID,
-		NodeName: agent.Name,
-		Location: agent.Location,
-		Provider: agent.Provider,
-		Status:   resp.Status,
+		NodeID:    agent.ID,
+		NodeName:  agent.Name,
+		Location:  agent.Location,
+		Provider:  agent.Provider,
+		Status:    resp.Status,
+		Interface: resp.Interface,
 	}
 	result.StartedAt = normalizeTimestamp(resp.StartedAt)
 	result.EndedAt = normalizeTimestamp(resp.EndedAt)

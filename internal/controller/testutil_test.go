@@ -37,6 +37,7 @@ type fakeAgent struct {
 	lastTrace    model.AgentTraceRequest
 	lastTraceRaw []byte
 	lastAuth     string
+	interfaces   []string
 	traceFn      func(w http.ResponseWriter, r *http.Request, req model.AgentTraceRequest)
 	healthFn     func(w http.ResponseWriter, r *http.Request)
 }
@@ -80,6 +81,7 @@ func (f *fakeAgent) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	healthFn := f.healthFn
+	interfaces := append([]string(nil), f.interfaces...)
 	f.mu.Unlock()
 	if healthFn != nil {
 		healthFn(w, r)
@@ -92,6 +94,7 @@ func (f *fakeAgent) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Version:       "0.1.0-test",
 		NextTrace:     model.NextTraceInfo{Available: true, Version: "v1.7.3"},
 		Limits:        model.AgentLimits{MaxHops: 64, MaxQueries: 5, MaxTimeoutMS: 120000, MaxConcurrentTraces: 4},
+		Interfaces:    interfaces,
 		Time:          time.Now().UTC().Format(time.RFC3339Nano),
 	})
 }
@@ -127,6 +130,12 @@ func (f *fakeAgent) handleTrace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeTestJSON(f.t, w, completedTraceResponse(req))
+}
+
+func (f *fakeAgent) setInterfaces(interfaces []string) {
+	f.mu.Lock()
+	f.interfaces = append([]string(nil), interfaces...)
+	f.mu.Unlock()
 }
 
 func (f *fakeAgent) setTraceHandler(fn func(w http.ResponseWriter, r *http.Request, req model.AgentTraceRequest)) {
@@ -171,6 +180,7 @@ func completedTraceResponse(req model.AgentTraceRequest) model.AgentTraceRespons
 		Family:           req.Family,
 		Protocol:         req.Protocol,
 		Port:             clonePort(req.Port),
+		Interface:        req.Interface,
 		StartedAt:        started.Format(time.RFC3339Nano),
 		EndedAt:          started.Add(1500 * time.Millisecond).Format(time.RFC3339Nano),
 		DurationMS:       1500,

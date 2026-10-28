@@ -23,7 +23,15 @@ type nodeHealth struct {
 	status           string
 	lastSeen         time.Time
 	nextTraceVersion string
+	// interfaces is the Agent-advertised, allowlisted interface list from the
+	// last successful health check. It is used to validate per-node interface
+	// selection and is exposed by GET /api/v1/nodes.
+	interfaces []string
 }
+
+// maxAdvertisedInterfaces bounds how many interfaces are cached/exposed per
+// Agent.
+const maxAdvertisedInterfaces = 64
 
 // Registry is the administrative node table. Nodes come exclusively from the
 // validated configuration; there is no runtime registration API.
@@ -117,6 +125,9 @@ func (r *Registry) NodeInfos() []model.NodeInfo {
 			info.LastSeen = health.lastSeen.UTC().Format(time.RFC3339)
 			info.NextTraceVersion = health.nextTraceVersion
 		}
+		if len(health.interfaces) > 0 {
+			info.Interfaces = append([]string(nil), health.interfaces...)
+		}
 		out = append(out, info)
 	}
 	return out
@@ -167,7 +178,50 @@ func (r *Registry) checkOne(ctx context.Context, agent *AgentConfig) {
 		status:           status,
 		lastSeen:         now,
 		nextTraceVersion: model.SanitizeText(health.NextTrace.Version, 64),
+		interfaces:       sanitizeAdvertisedInterfaces(health.Interfaces),
 	}
+}
+
+// Interfaces returns a copy of the interfaces the Agent advertised in its last
+// successful health check. An empty slice means the Agent advertised none (or
+// has not been reachable yet).
+func (r *Registry) Interfaces(id string) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	health, ok := r.health[id]
+	if !ok || len(health.interfaces) == 0 {
+		return nil
+	}
+	return append([]string(nil), health.interfaces...)
+}
+
+// sanitizeAdvertisedInterfaces keeps only syntactically valid interface names,
+// removes duplicates and preserves the Agent's ordering. The advertisement is
+// untrusted input even though the Agent is authenticated: it is never passed
+// through as an opaque string.
+func sanitizeAdvertisedInterfaces(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if len(out) >= maxAdvertisedInterfaces {
+			break
+		}
+		if name == "" || model.ValidateInterfaceName(name) != nil {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // Start runs the background health poller until ctx is cancelled. It checks

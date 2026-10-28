@@ -208,6 +208,54 @@ field is omitted entirely. Agent responses must echo the same protocol and, for
 include `protocol` and, for `tcp`/`udp`, `port`. History rows written before
 this feature was deployed may show an empty protocol until they age out.
 
+### Per-node network interface selection
+
+Interface selection is a **per-request** feature, not configuration: there is
+no Controller config field for it. `GET /api/v1/nodes` advertises the network
+interfaces each Agent reported in its authenticated `GET /v1/health` response
+(`interfaces`), and callers may optionally choose one source interface per node
+when creating a job:
+
+```json
+{
+  "target_ip": "8.8.8.8",
+  "original_target": "dns.example",
+  "node_ids": ["tokyo-1", "frankfurt-1"],
+  "protocol": "icmp",
+  "node_interfaces": {
+    "tokyo-1": "eth0",
+    "frankfurt-1": ""
+  },
+  "max_hops": 30,
+  "queries": 3,
+  "timeout_ms": 60000
+}
+```
+
+- The map is optional; an omitted/empty map means automatic routing for every
+  node (backwards-compatible behavior).
+- Keys must be node ids selected in `node_ids` (an unknown key is
+  `400 invalid_request`).
+- A value of `""` means automatic routing for that node.
+- Any other value must be a syntactically valid interface name
+  (`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}$`, at most 15 bytes) **and** present in
+  that Agent's cached advertisement from its last successful health check.
+  Unknown or not-advertised names, and names that are not valid Linux interface
+  names, are rejected with `400 invalid_request` and a safe message; the
+  Controller never passes arbitrary strings to an Agent.
+- Advertisements are refreshed by the periodic Agent health poller (30 s). A
+  node that has not completed a successful health check yet advertises an
+  empty list, so any non-empty selection for it is rejected with `400`.
+- The Controller dispatches the selected interface in the Agent trace request;
+  an Agent with no explicit selection omits the field entirely. Agents
+  revalidate the name against their own configured allowlist.
+- Agent responses must echo the interface (empty/omitted for automatic
+  routing); a mismatch marks only that node failed (`agent_error` family,
+  `parse_error`) without failing the other nodes.
+- Each node result in `GET /api/v1/jobs/{id}`, history job documents and JSON
+  exports includes the selected `interface` (omitted when automatic), so a
+  stored job never loses which source interface was used.
+
 ### `agents` (array, required, 1..16 entries)
 
 Administratively configured Agents. There is no API to add or change Agents at

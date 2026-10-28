@@ -238,6 +238,12 @@ func validateAgentTraceResponse(resp *model.AgentTraceResponse, req *model.Agent
 	} else if resp.Port != nil {
 		return newAgentCallError(agentErrProtocol, model.ErrParseError, "agent response must omit port for icmp")
 	}
+	if err := model.ValidateInterfaceName(resp.Interface); err != nil {
+		return newAgentCallError(agentErrProtocol, model.ErrParseError, "agent response interface is invalid")
+	}
+	if resp.Interface != req.Interface {
+		return newAgentCallError(agentErrProtocol, model.ErrParseError, "agent response interface does not match the request")
+	}
 	return nil
 }
 

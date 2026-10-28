@@ -15,6 +15,17 @@ shell, no user-controlled executable or flags, and no generic command API.
                                       (Go + SQLite)      (Go, unprivileged)
 ```
 
+![TraceCat dashboard showing a distributed trace with per-node results and AS paths](docs/screenshots/dashboard.png)
+
+<details>
+<summary>More screenshots (comparison view and mobile layout)</summary>
+
+![Side-by-side comparison view with aligned paths and honest computed differences](docs/screenshots/compare.png)
+
+<img src="docs/screenshots/mobile.png" alt="TraceCat mobile layout" width="360" />
+
+</details>
+
 ## Highlights
 
 - **Typed, shell-free execution.** Targets are parsed as numeric IP literals;

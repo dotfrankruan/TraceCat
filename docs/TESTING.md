@@ -57,9 +57,43 @@ pnpm --dir web build
 | Cloudflare Access JWT | bad signature/issuer/audience/expired tokens rejected; spoofed identity headers ignored |
 | CSRF / Origin | missing/mismatched CSRF token and cross-origin state changes rejected |
 
-## End-to-end verification (documented separately)
+## Verified run (this checkout)
 
-The MVP is additionally exercised end to end on a Linux host with real systemd
-and Tailscale, using the real NextTrace binary for one-shot ICMP traces and a
-loopback Agent for deterministic tests. See the verification section in the
-final report / `docs/DEPLOYMENT.md` verification checklist.
+Environment: macOS arm64, Go 1.27.3, Node 24/pnpm 12, NextTrace v1.7.1; plus a
+Debian 13 host (systemd 257, Tailscale 1.104, NextTrace v1.7.3) for real
+service deployment (`docs/VERIFICATION.md`).
+
+| Command | Result |
+| --- | --- |
+| `gofmt -l $(find . -name '*.go')` | clean |
+| `go vet ./...` | clean |
+| `go test -race -count=1 ./...` | all packages `ok` (agent ≈8.6 s, controller ≈11.4 s, nexttrace ≈3.2 s, ipguard ≈1.3 s, cmd ≈2.0 s) |
+| `pnpm --dir web typecheck` | exit 0 (strict TS) |
+| `pnpm --dir web build` | exit 0; embedded assets regenerated |
+| GitHub Actions CI (main) | Go vet/race/build and dashboard typecheck/build both green |
+
+A real local stack (Controller dev mode on loopback, Agent bound to loopback,
+real NextTrace v1.7.1) was exercised end to end:
+
+- `/resolve` for a literal returned the normalized address with
+  `requires_selection=false`; an injection attempt returned `invalid_request`;
+  a private address returned `422 target_rejected`; a missing CSRF header
+  returned `403`.
+- A distributed job to `1.1.1.1` completed in ≈4 s with parsed hops, ASN
+  `13335`, RTTs, `reached_destination=true`; SSE delivered the bare `Job`
+  snapshot; export contained `raw_results`; history listed the job; cancelling
+  a finished job returned `409`.
+- A two-node job with one unreachable Agent produced `partial` with
+  `agent_unreachable` on the failed node and an intact result for the healthy
+  node.
+- Cancelling a running trace killed the NextTrace process (verified with
+  `pgrep`), returned `200` + `cancelled` for the node, and left no orphans.
+- Dashboard flow (Chrome DevTools Protocol, real backend): resolve literal →
+  select agents → start → live status → hop table/AS path → compare view →
+  mobile layout, with no CSP violations, no console errors, and no spurious
+  transport warnings on normal SSE completion.
+
+Linux/systemd/Tailscale specifics (unprivileged Agent bound only to its tailnet
+address, bearer auth, real ICMP under `CAP_NET_RAW`, adversarial HTTP matrix,
+startup refusals, restart/cancellation) are recorded as PASS/FAIL checks in
+`docs/VERIFICATION.md`.

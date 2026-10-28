@@ -11,17 +11,17 @@ artifacts live under `verify/`.
 | Phase | Scope | Status |
 | --- | --- | --- |
 | 1 | Agent: unprivileged systemd deployment on the tailnet, real NextTrace execution, adversarial HTTP matrix | **PASS** (126 PASS / 0 FAIL / 1 informational SKIP) |
-| 2 | Controller + dashboard end-to-end over an SSH tunnel: DNS, multi-node jobs, SSE, export, history, cancellation, restart reconciliation, allowlist, local auth/CSRF/sessions, headless-Chrome screenshots | **PASS** (125 + 57 + 17 PASS / 0 + 0 + 0 FAIL, 1 N/A) |
-| **Total** | | **325 PASS / 0 FAIL / 2 SKIP** |
+| 2 | Controller + dashboard end-to-end over an SSH tunnel: DNS, multi-node jobs, SSE, export, history, cancellation, restart reconciliation, allowlist, local auth/CSRF/sessions, headless-Chrome screenshots | **PASS** (125 + 61 + 17 PASS / 0 + 0 + 0 FAIL, 1 N/A) |
+| **Total** | | **329 PASS / 0 FAIL / 2 SKIP** |
 
 ## 0. Environment and artifacts
 
 | Item | Value |
 | --- | --- |
-| Final verified commit | `4e3aa596b2d3e0fe304007cc550d3885adec7c89` (`4e3aa59` — NextTrace top-level `Hostname` reverse-DNS fix; parent `6d1644d` added the Controller target allowlist and restart reconciliation). Repository HEAD when this report was written is `551f15c357320785f8127a2839d8803943c8265a` (docs-only changelog/link commit; `git diff 4e3aa59..HEAD -- '*.go' '*.service' '*.json'` is empty), so the verified binaries correspond exactly to the final production code. |
-| Working tree | tracked production files clean: `git status --porcelain` lists only the verifier's new `docs/VERIFICATION.md` and `verify/` |
-| Verified binaries | both cross-compiled from `4e3aa59` with `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath`: agent `sha256 f0a277598950d731…`, controller `sha256 159c3e4b61d6da9b…` |
-| Final runs | Agent matrix 2026-10-28T14:18:41Z; Controller matrix 2026-10-28T14:20:42Z; local-auth 2026-10-28T14:21:07Z; browser proof 2026-10-28T14:23:19Z |
+| Final verified commit | `28f38f4b99558814ce604ae4f596a6f90e6dc738` (`28f38f4`). Delta over `4e3aa59`: Controller `429` responses now send `Retry-After: 1` and local-mode `POST /api/v1/auth/login` requires `Content-Type: application/json` (`415` otherwise) — only `internal/controller/api.go` and `internal/controller/httputil.go` changed; Agent code is unchanged (empty `git diff 4e3aa59..28f38f4 -- internal/agent internal/nexttrace cmd/tracecat-agent deploy/systemd/tracecat-agent.service`). Repository HEAD when this report was written is `feb0f1ae73597bcc4db5fa73f1c5c22582a90192` (docs-only `README.md` commit; `git diff 28f38f4..HEAD` touches only `README.md`), so the verified binaries correspond to the final compiled code. |
+| Working tree | tracked production files clean; the only modifications are verifier-owned (`verify/` delta harness, refreshed screenshots and this report), committed with the delta. |
+| Verified binaries | rebuilt from `28f38f4` with `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath` and redeployed: agent `sha256 2d19a524810bbaf6…` (source identical to `4e3aa59`; hash differs only by build/VCS stamping), controller `sha256 4fd42e28e0a4d3ac…` |
+| Final runs | Agent matrix 2026-10-28T14:18:41Z (at 4e3aa59; agent code unchanged); Controller matrix 2026-10-28T14:27:34Z; local-auth 2026-10-28T14:28:00Z; browser proof 2026-10-28T14:30:47Z |
 | Test host | `root@124.222.154.86` — Debian 13, kernel `6.12.95+deb13-amd64`, systemd `257.13-1~deb13u1`, Tailscale `1.104.4` |
 | Tailnet addresses | IPv4 `100.81.98.125`, IPv6 `fd7a:115c:a1e0::4d2f:627e` |
 | NextTrace | `v1.7.3 2026-08-23T16:13:15Z 40ac803`, `sha256 aa75440fcdee46c1…` |
@@ -55,7 +55,7 @@ macOS (headless Chrome + CDP)                 Debian test host (root@124.222.154
 ## 1. Verdict
 
 Both phases are **PASS**. Totals across the three suites and the browser proof:
-**325 PASS, 0 FAIL, 2 SKIP**. Three
+**329 PASS, 0 FAIL, 2 SKIP**. Three
 blocking defects were found during Phase 1, reported with minimal
 reproductions, fixed upstream and independently re-verified; no blocking defect
 was found in Phase 2.
@@ -79,7 +79,7 @@ Phase 1 (Agent):
 
 Phase 2 (Controller + dashboard):
 
-- deployed from `4e3aa59` with the repository's systemd unit and embedded
+- deployed from `28f38f4` with the repository's systemd unit and embedded
   dashboard; both tailnet Agents report `health: ok` with NextTrace v1.7.3;
 - central DNS resolution returns real A/AAAA answers (e.g. `example.com` → 2×IPv4
   + 2×IPv6, explicit selection required) with the CDN/GeoDNS warning;
@@ -266,7 +266,7 @@ PY
 
 ## 5. Verification matrix (Phase 1)
 
-Final run against the `4e3aa59` build: **126 PASS, 0 FAIL, 1 SKIP** (127 recorded checks; the SKIP is an informational network-capability probe, not a product check).
+Run at `4e3aa59`: **126 PASS, 0 FAIL, 1 SKIP** (127 recorded checks; the SKIP is an informational network-capability probe, not a product check). The matrix was not re-run for the `28f38f4` delta because no Agent/NextTrace code changed (`git diff 4e3aa59..28f38f4 -- internal/agent internal/nexttrace cmd/tracecat-agent deploy/systemd/tracecat-agent.service` is empty).
 Rows marked `real_trace_*_contract` each aggregate the independent wire-contract
 checks from `verify/check_trace_response.py`.
 
@@ -685,9 +685,9 @@ Startup log (no secrets or paths):
 | Suite | Checks | Result |
 | --- | --- | --- |
 | Controller (dev instance, API/SSE/export/history/cancel/reconciliation/allowlist/static) | 125 | **125 PASS, 0 FAIL** |
-| Local auth (PBKDF2, cookies, CSRF, logout, SQLite sessions, rate limits, headers) | 58 | **57 PASS, 0 FAIL, 1 SKIP** |
+| Local auth (PBKDF2, cookies, CSRF, logout, SQLite sessions, rate limits, headers) | 62 | **61 PASS, 0 FAIL, 1 SKIP** |
 | Browser proof (headless Chrome over the SSH tunnel) | 17 | **17 PASS, 0 FAIL** |
-| Phase 2 total | 200 | **199 PASS, 0 FAIL, 1 SKIP** |
+| Phase 2 total | 204 | **203 PASS, 0 FAIL, 1 SKIP** |
 
 Key end-to-end evidence:
 
@@ -808,7 +808,7 @@ Key end-to-end evidence:
 |---|---|---|---|---|
 | E1 | `resolve_ip_for_job` | 1.1.1.1 | `1.1.1.1` | PASS |
 | E2 | `job_create_multi_node` | 202 | `202` | PASS |
-| E3 | `job_id_shape` | 32 hex | `f6f73e0b6aa3d53cc6714fb1e96c166c` | PASS |
+| E3 | `job_id_shape` | 32 hex | `a777b6597b5cce29269cc233cadddca8` | PASS |
 | E4 | `job_initial_status` | pending/running | `pending` | PASS |
 | E5 | `sse_connect` | 200 | `200` | PASS |
 | E6 | `sse_content_type` | text/event-stream | `text/event-stream` | PASS |
@@ -817,23 +817,23 @@ Key end-to-end evidence:
 | E9 | `sse_closed_on_terminal` | server closed stream (curl exit 0, not timeout) | `curl_exit=0 code=200` | PASS |
 | E10 | `job_completed` | completed | `completed` | PASS |
 | E11 | `both_nodes_completed_with_hops` | both completed, hops parsed | `debian-test-1=completed/hops=14 debian-test-2=completed/hops=14` | PASS |
-| E12 | `job_node_summaries` | per-node summaries present | `debian-test-1: {'hop_count': 14, 'reached_destination': True, 'destination_rtt_ms': 234.109, 'replies': 5, 'probes': 14} \| debian-test-2: {'hop_count': 14, 'reached_destination': True, 'destination_rtt_ms': 232.209, 'replies': 5, 'probes': 14}` | PASS |
+| E12 | `job_node_summaries` | per-node summaries present | `debian-test-1: {'hop_count': 14, 'reached_destination': True, 'destination_rtt_ms': 235.963, 'replies': 5, 'probes': 14} \| debian-test-2: {'hop_count': 14, 'reached_destination': True, 'destination_rtt_ms': 239.574, 'replies': 5, 'probes': 14}` | PASS |
 | E13 | `destination_ptr_reverse_dns` | 1.1.1.1 hop shows one.one.one.one | `reverse_dns=True records=['debian-test-1/1.1.1.1=one.one.one.one', 'debian-test-2/1.1.1.1=one.one.one.one']` | PASS |
 | E14 | `export_ok` | 200 | `200` | PASS |
-| E15 | `export_content_disposition` | attachment filename | `attachment; filename="tracecat-f6f73e0b6aa3d53cc6714fb1e96c166c.json"` | PASS |
-| E16 | `export_structure_bounded_raw` | 2 raw results, pure JSON, no banner | `raw_results=['debian-test-1', 'debian-test-2'] sizes={'debian-test-1': 3626, 'debian-test-2': 3629}` | PASS |
+| E15 | `export_content_disposition` | attachment filename | `attachment; filename="tracecat-a777b6597b5cce29269cc233cadddca8.json"` | PASS |
+| E16 | `export_structure_bounded_raw` | 2 raw results, pure JSON, no banner | `raw_results=['debian-test-1', 'debian-test-2'] sizes={'debian-test-1': 3589, 'debian-test-2': 3668}` | PASS |
 | E17 | `export_no_banner_text` | no NextTrace advisory | `none` | PASS |
 | E18 | `history_list` | 200 | `200` | PASS |
-| E19 | `history_persists_across_restart` | job retrievable after restart | `200 id=f6f73e0b6aa3d53cc6714fb1e96c166c` | PASS |
+| E19 | `history_persists_across_restart` | job retrievable after restart | `200 id=a777b6597b5cce29269cc233cadddca8` | PASS |
 | E20 | `controller_restart_healthy` | active | `active` | PASS |
 
 #### F. cancellation across both Agents
 
 | # | Check | Expected | Observed | Result |
 |---|---|---|---|---|
-| F1 | `cancel_job_created` | 202 | `202 id=15e094ee730c80444cdb0ed62c20dbd0` | PASS |
+| F1 | `cancel_job_created` | 202 | `202 id=128a8c418f85752f86fa610998ddf875` | PASS |
 | F2 | `agents_running_traces` | >=1 nexttrace child | `children=2` | PASS |
-| F3 | `cancel_request_accepted` | 200 with job id (cancellation is asynchronous) | `200 id=15e094ee730c80444cdb0ed62c20dbd0 status=running` | PASS |
+| F3 | `cancel_request_accepted` | 200 with job id (cancellation is asynchronous) | `200 id=128a8c418f85752f86fa610998ddf875 status=running` | PASS |
 | F4 | `cancel_reaps_agent_children` | no nexttrace child within 15s | `reaped` | PASS |
 | F5 | `cancel_terminal_state` | cancelled | `cancelled nodes=debian-test-1:cancelled,debian-test-2:cancelled` | PASS |
 | F6 | `cancelled_nodes` | node statuses cancelled | `debian-test-1:cancelled,debian-test-2:cancelled` | PASS |
@@ -846,7 +846,7 @@ Key end-to-end evidence:
 |---|---|---|---|---|
 | F2.1 | `recon_job_created` | 202 | `202` | PASS |
 | F2.2 | `recon_job_running` | >=1 nexttrace child | `children=2` | PASS |
-| F2.3 | `controller_auto_restarted_after_crash` | systemd Restart=on-failure restarted it | `old=3615609 new=3615787` | PASS |
+| F2.3 | `controller_auto_restarted_after_crash` | systemd Restart=on-failure restarted it | `old=3619109 new=3619291` | PASS |
 | F2.4 | `interrupted_job_marked_failed` | failed job + failed nodes with internal error | `job=failed nodes=debian-test-1:failed/internal,debian-test-2:failed/internal` | PASS |
 | F2.5 | `reconciliation_logged` | journal warns about reconciled jobs | `marked jobs interrupted by a previous Controller process as failed` | PASS |
 | F2.6 | `history_has_no_stale_running_jobs` | history clean after restart | `stale_running=[]` | PASS |
@@ -943,7 +943,8 @@ Key end-to-end evidence:
 | C3 | `login_malformed_json` | 400 | `400 invalid_request` | PASS |
 | C4 | `login_unknown_field` | 400 | `400 invalid_request` | PASS |
 | C5 | `login_body_over_4kib` | 413 | `413 payload_too_large size=5017` | PASS |
-| C6 | `login_content_type_not_bypassed` | not 200 (401 or 415); JSON/password still validated | `401 unauthorized` | PASS |
+| C6 | `login_content_type_not_bypassed` | not 200 (401 or 415); JSON/password still validated | `415 invalid_request` | PASS |
+| C7 | `login_text_plain_415` | 415 unsupported media type | `415 invalid_request` | PASS |
 
 #### D. successful login, cookie attributes, CSRF
 
@@ -983,23 +984,26 @@ Key end-to-end evidence:
 | F1 | `third_login_for_persistence` | 200 | `200` | PASS |
 | F2 | `session_survives_restart` | 200 after controller restart | `200` | PASS |
 | F3 | `local_instance_active_after_restart` | active | `active` | PASS |
-| F4 | `session_storage_hashed_and_persistent` | sha256(token) in SQLite, raw token absent, csrf stored | `tables=['jobs', 'job_nodes', 'sessions'] sessions=9 cols=['token_hash', 'subject', 'email', 'csrf_token', 'created_unix', 'expires_unix'] token_hash=sha256(stored) raw_token_absent=yes` | PASS |
+| F4 | `session_storage_hashed_and_persistent` | sha256(token) in SQLite, raw token absent, csrf stored | `tables=['jobs', 'job_nodes', 'sessions'] sessions=12 cols=['token_hash', 'subject', 'email', 'csrf_token', 'created_unix', 'expires_unix'] token_hash=sha256(stored) raw_token_absent=yes` | PASS |
 
 #### G. controller rate limits (local instance has small limits)
 
 | # | Check | Expected | Observed | Result |
 |---|---|---|---|---|
 | G1 | `resolve_rate_limit` | 5 allowed then 429 | `codes=200 200 200 200 200 429` | PASS |
-| G2 | `resolve_rate_limit_envelope` | 429 rate_limited | `429 rate_limited retry_after=` | PASS |
-| G3 | `job_rate_limit` | 3 allowed then 429 | `codes=202 202 202 429` | PASS |
+| G2 | `resolve_rate_limit_envelope` | 429 rate_limited | `429 rate_limited retry_after=1` | PASS |
+| G3 | `resolve_429_retry_after` | numeric Retry-After header | `1` | PASS |
+| G4 | `job_rate_limit` | 3 allowed then 429 | `codes=202 202 202 429` | PASS |
+| G5 | `job_429_retry_after` | 429 rate_limited with numeric Retry-After | `429 rate_limited retry_after=1` | PASS |
 
 #### H. login rate limit (per client IP, trusted-proxy aware)
 
 | # | Check | Expected | Observed | Result |
 |---|---|---|---|---|
 | H1 | `login_rate_limit` | >=1 x 429 within 13 failures | `codes=401 401 401 401 401 401 401 401 401 401 429 429 429` | PASS |
-| H2 | `login_rate_limit_envelope` | 429 rate_limited | `429 rate_limited retry_after=` | PASS |
-| H3 | `login_rate_limit_per_client` | other client still logs in | `200` | PASS |
+| H2 | `login_rate_limit_envelope` | 429 rate_limited | `429 rate_limited retry_after=1` | PASS |
+| H3 | `login_429_retry_after` | numeric Retry-After header | `1` | PASS |
+| H4 | `login_rate_limit_per_client` | other client still logs in | `200` | PASS |
 
 #### I. API surface, body limits, dashboard headers
 
@@ -1106,13 +1110,14 @@ and documented rather than worked around:
    modes are unaffected (`local` sessions carry a persisted CSRF token;
    `cloudflare` can pin the key via `csrf_secret_env`). Worth a documentation
    sentence for dev-mode users.
-2. **Controller `429` responses do not set `Retry-After`** (the Agent does).
-   The API documentation only promises `Retry-After` for the Agent, so this is
-   a minor consistency gap; clients currently back off generically.
-3. **`POST /api/v1/auth/login` does not reject a non-JSON `Content-Type` with
-   `415`**; it still strictly decodes and bounds the JSON body and validates the
-   password (401/400/413 as appropriate), so there is no bypass — only a
-   consistency difference from the Agent API.
+2. **Fixed in `28f38f4`:** Controller `429` responses did not set
+   `Retry-After` (the Agent did). `internal/controller/httputil.go` now sends
+   `Retry-After: 1`; re-verified for login, resolve and job limits.
+3. **Fixed in `28f38f4`:** `POST /api/v1/auth/login` did not reject a non-JSON
+   `Content-Type` with `415` (the body was already strictly decoded/bounded and
+   the password validated, so there was no bypass).
+   `internal/controller/api.go` now returns `415 invalid_request`; re-verified
+   with `text/plain`.
 4. **`GET /assets/` returns the SPA index (200), not 404.** This is the
    documented "SPA fallback for extension-less GET paths" and never a directory
    listing; traversal attempts (`/assets/../../etc/passwd`, encoded variants)
@@ -1176,12 +1181,29 @@ CDP_PORT=9333 APP_URL=http://127.0.0.1:18090/ OUT_DIR=verify/screenshots \
 
 Expected: `SUMMARY: 126 PASS, 0 FAIL, 1 SKIP` (agent),
 `SUMMARY: 125 PASS, 0 FAIL, 0 SKIP` (controller),
-`SUMMARY: 57 PASS, 0 FAIL, 1 SKIP` (local auth),
+`SUMMARY: 61 PASS, 0 FAIL, 1 SKIP` (local auth),
 `SUMMARY 17/17 browser checks passed`.
 
-Note: the repository HEAD at report time (`551f15c`) adds only changelog/documentation
-on top of the verified commit, so the binaries and screenshots above were built and
-captured from exactly the production code at `4e3aa59`.
+Note: the repository HEAD at report time (`feb0f1a`) adds only `README.md`
+documentation on top of the delta commit, so the binaries and screenshots above
+were built and captured from exactly the compiled production code at `28f38f4`.
+
+### 12.9 Delta re-verification at `28f38f4`
+
+Two small Controller changes were made from the verifier's observations; the
+delta was rebuilt, redeployed and re-tested:
+
+| Item | Detail |
+| --- | --- |
+| Commit | `28f38f4b99558814ce604ae4f596a6f90e6dc738` (`28f38f4`), parent `4e3aa59` |
+| Changed production code | `internal/controller/httputil.go` — `Retry-After: 1` on every `429`; `internal/controller/api.go` — `POST /api/v1/auth/login` requires `Content-Type: application/json` (`415` otherwise). Agent/NextTrace code untouched. |
+| Rebuilt / redeployed | both linux/amd64 binaries rebuilt at `28f38f4`; dev Controller, local-auth Controller and both Agents restarted; `/healthz` 200 on both Controllers, Agents active on `:8443`/`:8444` |
+| Controller suite (re-run) | **125 PASS / 0 FAIL** — unchanged behavior (health, dev session/proxy guard, nodes, DNS, allowlist, multi-node job, SSE, export, history, cancellation, crash reconciliation, static/CSP/bundle) |
+| Local-auth suite (re-run, +4 delta checks) | **61 PASS / 0 FAIL / 1 SKIP** — includes explicit `login text/plain → 415` and `Retry-After` on resolve/job/login `429`s |
+| Browser smoke (re-run) | **17/17 checks** — dashboard loaded, one real two-node job completed, Compare + mobile view; 0 console errors / 0 uncaught exceptions / 0 CSP violations; screenshots refreshed at `28f38f4` |
+| Agent matrix | **not re-run by design**: Agent code unchanged (diff for Agent/NextTrace/unit is empty); Phase-1 results above remain valid |
+| Delta-specific results | `PASS login_text_plain_415` (415 invalid_request); `PASS resolve_429_retry_after` (1); `PASS job_429_retry_after` (1); `PASS login_429_retry_after` (1) |
+| Totals after delta | grand total **329 PASS / 0 FAIL / 2 SKIP** (Agent 126; Controller 125; local auth 61; browser 17) |
 
 The services are left running on the test host (`tracecat-agent`,
 `tracecat-agent-b`, `tracecat-controller`, `tracecat-controller-local`) for

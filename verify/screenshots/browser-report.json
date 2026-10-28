@@ -1,6 +1,6 @@
 {
   "url": "http://127.0.0.1:18090/",
-  "generated_at": "2026-10-28T14:23:19.955Z",
+  "generated_at": "2026-10-28T14:30:47.338Z",
   "checks": [
     {
       "name": "two_agents_rendered",

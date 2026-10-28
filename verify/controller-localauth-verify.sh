@@ -140,6 +140,9 @@ record "$([[ "$CODE" == 413 ]] && echo PASS || echo FAIL)" "login_body_over_4kib
 req "$FAKEJAR" POST /api/v1/auth/login "$(python3 -c 'import json;print(json.dumps({"password":"whatever-pw"}))')" text/plain -H 'X-Forwarded-For: 198.51.100.10'
 record "$([[ "$CODE" != 200 && ( "$CODE" == 401 || "$CODE" == 415 ) ]] && echo PASS || echo FAIL)" \
   "login_content_type_not_bypassed" "not 200 (401 or 415); JSON/password still validated" "$CODE $(jget error.code)"
+req "$FAKEJAR" POST /api/v1/auth/login "$(python3 -c 'import json;print(json.dumps({"password":"whatever-pw"}))')" text/plain -H 'X-Forwarded-For: 198.51.100.11'
+record "$([[ "$CODE" == 415 && $(jget error.code) == invalid_request ]] && echo PASS || echo FAIL)" \
+  "login_text_plain_415" "415 unsupported media type" "$CODE $(jget error.code)"
 
 # =========================================================================
 section "D. successful login, cookie attributes, CSRF"
@@ -252,8 +255,11 @@ for _ in $(seq 1 6); do
 done
 record "$(grep -q ' 429' <<<"$resolve_codes" && echo PASS || echo FAIL)" "resolve_rate_limit" "5 allowed then 429" "codes=${resolve_codes# }"
 req "$JAR3" POST /api/v1/resolve '{"target":"1.1.1.1"}' application/json -H "X-TraceCat-CSRF: $CSRF3" -H "Origin: $ORIGIN"
+resolve_retry=$(hdr_get Retry-After)
 record "$([[ "$CODE" == 429 && $(jget error.code) == rate_limited ]] && echo PASS || echo FAIL)" \
-  "resolve_rate_limit_envelope" "429 rate_limited" "$CODE $(jget error.code) retry_after=$(hdr_get Retry-After)"
+  "resolve_rate_limit_envelope" "429 rate_limited" "$CODE $(jget error.code) retry_after=${resolve_retry:-none}"
+record "$([[ "$resolve_retry" =~ ^[0-9]+$ ]] && echo PASS || echo FAIL)" \
+  "resolve_429_retry_after" "numeric Retry-After header" "${resolve_retry:-none}"
 
 # jobs: 3/min -> 4th must be 429 (jobs are tiny: 1 hop, 5 s timeout)
 job_codes=""
@@ -265,6 +271,11 @@ for _ in $(seq 1 4); do
 done
 sleep 8  # let the quick jobs finish so the 4th request hits the rate limit, not the concurrency cap
 record "$(grep -q ' 429' <<<"$job_codes" && echo PASS || echo FAIL)" "job_rate_limit" "3 allowed then 429" "codes=${job_codes# }"
+job_body=$(printf '{"target_ip":"1.1.1.1","node_ids":["%s"],"protocol":"icmp","max_hops":1,"queries":1,"timeout_ms":5000}' "$AGENT_A")
+req "$JAR3" POST /api/v1/jobs "$job_body" application/json -H "X-TraceCat-CSRF: $CSRF3" -H "Origin: $ORIGIN"
+job_retry=$(hdr_get Retry-After)
+record "$([[ "$CODE" == 429 && "$job_retry" =~ ^[0-9]+$ ]] && echo PASS || echo FAIL)" \
+  "job_429_retry_after" "429 rate_limited with numeric Retry-After" "$CODE $(jget error.code) retry_after=${job_retry:-none}"
 
 # =========================================================================
 section "H. login rate limit (per client IP, trusted-proxy aware)"
@@ -277,7 +288,10 @@ done
 n429=$(grep -o '429' <<<"$codes" | wc -l | tr -d ' ')
 record "$([[ "$n429" -ge 1 ]] && echo PASS || echo FAIL)" "login_rate_limit" ">=1 x 429 within 13 failures" "codes=${codes# }"
 login "$FAKEJAR" "wrong-password-final" -H 'X-Forwarded-For: 198.51.100.7'
-record "$([[ "$CODE" == 429 ]] && echo PASS || echo FAIL)" "login_rate_limit_envelope" "429 rate_limited" "$CODE $(jget error.code) retry_after=$(hdr_get Retry-After)"
+login_retry=$(hdr_get Retry-After)
+record "$([[ "$CODE" == 429 ]] && echo PASS || echo FAIL)" "login_rate_limit_envelope" "429 rate_limited" "$CODE $(jget error.code) retry_after=${login_retry:-none}"
+record "$([[ "$login_retry" =~ ^[0-9]+$ ]] && echo PASS || echo FAIL)" \
+  "login_429_retry_after" "numeric Retry-After header" "${login_retry:-none}"
 # a different client is unaffected (the limiter is per client IP)
 login "$TMPD/jar_other" "$PASSWORD"
 record "$([[ "$CODE" == 200 ]] && echo PASS || echo FAIL)" "login_rate_limit_per_client" "other client still logs in" "$CODE"

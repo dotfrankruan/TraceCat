@@ -63,14 +63,14 @@ jobs:
             mkdir -p "stage/controller-${arch}" "stage/agent-${arch}"
 
             # Controller bundle
-            mkdir -p "stage/controller-${arch}"/{bin,configs,deploy/systemd,deploy/docker}
+            mkdir -p "stage/controller-${arch}"/{bin,configs,deploy/systemd}
             cp "dist/tracecat-controller-linux-${arch}" "stage/controller-${arch}/bin/tracecat-controller"
             cp configs/controller.example.json "stage/controller-${arch}/configs/"
             cp deploy/systemd/tracecat-controller.service deploy/systemd/tracecat-controller.env.example \
               "stage/controller-${arch}/deploy/systemd/"
-            cp deploy/docker/docker-compose.yml deploy/docker/Dockerfile.controller "stage/controller-${arch}/deploy/docker/"
             cp deploy/install.sh QUICKSTART.md CHANGELOG.md LICENSE NOTICE README.md SECURITY.md "stage/controller-${arch}/"
             cp -r docs "stage/controller-${arch}/"
+            rm -rf "stage/controller-${arch}/docs/screenshots"
             printf '%s\n' "${VERSION}" > "stage/controller-${arch}/VERSION"
             tar -czf "dist/tracecat-controller-linux-${arch}.tar.gz" \
               -C "stage/controller-${arch}" .
@@ -83,6 +83,7 @@ jobs:
               "stage/agent-${arch}/deploy/systemd/"
             cp deploy/install.sh QUICKSTART.md CHANGELOG.md LICENSE NOTICE README.md SECURITY.md "stage/agent-${arch}/"
             cp -r docs "stage/agent-${arch}/"
+            rm -rf "stage/agent-${arch}/docs/screenshots"
             printf '%s\n' "${VERSION}" > "stage/agent-${arch}/VERSION"
             tar -czf "dist/tracecat-agent-linux-${arch}.tar.gz" \
               -C "stage/agent-${arch}" .

@@ -47,12 +47,9 @@ for arch in "${ARCHES[@]}"; do
     cp "configs/${component}.example.json" "$stage_dir/configs/"
     cp "deploy/systemd/tracecat-${component}.service" \
        "deploy/systemd/tracecat-${component}.env.example" "$stage_dir/deploy/systemd/"
-    if [[ "$component" == "controller" ]]; then
-      mkdir -p "$stage_dir/deploy/docker"
-      cp deploy/docker/docker-compose.yml deploy/docker/Dockerfile.controller "$stage_dir/deploy/docker/"
-    fi
     cp deploy/install.sh QUICKSTART.md CHANGELOG.md LICENSE NOTICE README.md SECURITY.md "$stage_dir/"
     cp -r docs "$stage_dir/"
+    rm -rf "$stage_dir/docs/screenshots"
     printf '%s\n' "$VERSION" >"$stage_dir/VERSION"
     tar -czf "dist/tracecat-${component}-linux-${arch}.tar.gz" -C "$stage_dir" .
   done

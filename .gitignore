@@ -1,0 +1,35 @@
+# Binaries
+/bin/
+/dist/
+*.exe
+
+# Frontend
+web/node_modules/
+web/dist/
+internal/webui/public/*
+!internal/webui/public/.gitkeep
+
+# Go test / tooling output
+*.test
+coverage.out
+coverage.html
+/testdata/tmp/
+
+# Runtime state
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.log
+
+# Local secrets / machine-specific config
+.env
+.env.*
+!.env.example
+*.local.json
+configs/*.local.json
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

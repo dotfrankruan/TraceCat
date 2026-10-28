@@ -1,0 +1,31 @@
+TraceCat
+Copyright 2026 Frank Ruan
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party software
+--------------------
+
+TraceCat invokes NextTrace as an external, locally installed command-line
+program. NextTrace is an independent project by the NTrace authors, licensed
+under the GNU General Public License version 3 (GPL-3.0):
+
+    https://github.com/nxtrace/NTrace-core
+
+NextTrace source code is NOT vendored, modified, linked, or redistributed by
+this repository. TraceCat only executes an administrator-installed `nexttrace`
+binary with a fixed, validated argument vector, and includes attribution and a
+link to the upstream project in its documentation and UI as required by the
+upstream project's licensing and attribution requirements. Operators are
+responsible for complying with GPL-3.0 when distributing a NextTrace binary
+alongside TraceCat (for example inside a container image): provide the
+corresponding source or a written offer as required by that license.
+
+Go module dependencies are listed in go.mod; their licenses are available from
+their respective module repositories:
+
+    golang.org/x/net          BSD-3-Clause
+    modernc.org/sqlite        BSD-3-Clause (SQLite itself is public domain)
+
+The web dashboard is built with React (MIT), TypeScript (Apache-2.0),
+Vite (MIT) and @vitejs/plugin-react (MIT).

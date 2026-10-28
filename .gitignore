@@ -2,6 +2,8 @@
 /bin/
 /dist/
 *.exe
+/tracecat-controller
+/tracecat-agent
 
 # Frontend
 web/node_modules/
@@ -17,6 +19,7 @@ coverage.html
 /testdata/tmp/
 
 # Runtime state
+/var/
 *.db
 *.db-wal
 *.db-shm

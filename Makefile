@@ -54,9 +54,21 @@ vet:
 fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './web/*')
 
-## check: everything CI runs.
-check: vet test
-	@test -f web/package.json && $(PNPM) --dir web install --frozen-lockfile && $(PNPM) --dir web build || true
+## check: everything CI runs (fails if any step fails).
+check: fmt-check vet test
+	@if command -v $(PNPM) >/dev/null 2>&1 && [ -f web/package.json ]; then \
+		$(PNPM) --dir web install --frozen-lockfile && \
+		$(PNPM) --dir web typecheck && \
+		$(PNPM) --dir web build; \
+	else \
+		echo "note: pnpm not installed; skipping dashboard typecheck/build"; \
+	fi
+
+## fmt-check: fail if any Go file is not gofmt'd.
+fmt-check:
+	@files="$$(find . -name '*.go' -not -path './web/*')"; \
+	unformatted="$$(gofmt -l $$files)"; \
+	if [ -n "$$unformatted" ]; then echo "gofmt needed:"; echo "$$unformatted"; exit 1; fi
 
 ## clean: remove build artifacts (keeps embedded UI placeholder).
 clean:

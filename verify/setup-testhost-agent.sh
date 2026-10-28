@@ -51,13 +51,17 @@ cat >"$CONFIG_TMP" <<JSON
     "max_execution_ms": 60000,
     "max_stdout_bytes": 4194304,
     "max_raw_bytes": 1048576,
-    "geo_provider": ""
+    "geo_provider": "",
+    "allowed_protocols": ["icmp", "tcp", "udp"]
   },
   "security": {
     "allow_private_targets": false,
     "allowed_cidrs": [],
-    "require_tailscale_bind": true,
-    "allow_non_tailscale_bind": false
+    "allow_public_bind": false
+  },
+  "interfaces": {
+    "exclude": [],
+    "include": []
   },
   "rate_limit": {
     "requests_per_minute": 60,

@@ -84,6 +84,9 @@ def main():
     ap.add_argument("--max-bytes", type=int, default=8 << 20)
     ap.add_argument("--expect-status", default="completed")
     ap.add_argument("--expect-ptr", default="", help="require a hop PTR containing this substring")
+    ap.add_argument("--expect-protocol", default="icmp", choices=["icmp", "tcp", "udp"])
+    ap.add_argument("--expect-port", default="", help="expected destination port for tcp/udp")
+    ap.add_argument("--expect-interface", default="", help="expected echoed source interface")
     args = ap.parse_args()
     if not args.token:
         # Avoid putting the bearer token on the command line / in ps output.
@@ -125,7 +128,15 @@ def main():
     check("status_expected", status == args.expect_status, f"want={args.expect_status} got={status!r}")
 
     check("family_echo", doc.get("family") == args.family, repr(doc.get("family")))
-    check("protocol_echo", doc.get("protocol") == "icmp", repr(doc.get("protocol")))
+    check("protocol_echo", doc.get("protocol") == args.expect_protocol, f"want={args.expect_protocol} got={doc.get('protocol')!r}")
+    if args.expect_protocol in ("tcp", "udp"):
+        check("port_echo", doc.get("port") == int(args.expect_port), f"want={args.expect_port} got={doc.get('port')!r}")
+    else:
+        check("icmp_omits_port", "port" not in doc, f"port={doc.get('port')!r}")
+    if args.expect_interface:
+        check("interface_echo", doc.get("interface") == args.expect_interface, f"want={args.expect_interface} got={doc.get('interface')!r}")
+    else:
+        check("auto_omits_interface", "interface" not in doc, f"interface={doc.get('interface')!r}")
     check("target_echo", doc.get("target_ip") == args.target, repr(doc.get("target_ip")))
     check("target_canonical", is_canonical_ip(doc.get("target_ip") or ""), repr(doc.get("target_ip")))
     job = doc.get("job_id") or ""

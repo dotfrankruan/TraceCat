@@ -59,13 +59,17 @@ cat >"$TMPD/agent-b.json" <<JSON
     "max_execution_ms": 60000,
     "max_stdout_bytes": 4194304,
     "max_raw_bytes": 1048576,
-    "geo_provider": ""
+    "geo_provider": "",
+    "allowed_protocols": ["icmp", "tcp", "udp"]
   },
   "security": {
     "allow_private_targets": false,
     "allowed_cidrs": [],
-    "require_tailscale_bind": true,
-    "allow_non_tailscale_bind": false
+    "allow_public_bind": false
+  },
+  "interfaces": {
+    "exclude": [],
+    "include": []
   },
   "rate_limit": { "requests_per_minute": 120, "burst": 20, "max_concurrent_http": 16 },
   "log_level": "info"
@@ -93,7 +97,8 @@ cat >"$TMPD/controller.json" <<JSON
     "max_concurrent_jobs": 4,
     "max_concurrent_traces": 4,
     "max_resolves_per_minute": 300,
-    "max_raw_result_bytes": 1048576
+    "max_raw_result_bytes": 1048576,
+    "allowed_protocols": ["icmp", "tcp", "udp"]
   },
   "agents": [
     {
@@ -149,7 +154,8 @@ cat >"$TMPD/controller-local.json" <<JSON
     "max_concurrent_jobs": 4,
     "max_concurrent_traces": 4,
     "max_resolves_per_minute": 300,
-    "max_raw_result_bytes": 1048576
+    "max_raw_result_bytes": 1048576,
+    "allowed_protocols": ["icmp", "tcp", "udp"]
   },
   "agents": [
     {

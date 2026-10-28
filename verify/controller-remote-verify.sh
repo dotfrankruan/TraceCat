@@ -211,6 +211,8 @@ CSRF=$(jget csrf_token)
 record "$([[ ${#CSRF} -ge 32 ]] && echo PASS || echo FAIL)" "session_csrf_token" ">=32 chars" "len=${#CSRF}"
 record "$([[ $(jget limits.max_hops) == 30 && $(jget limits.max_queries) == 3 ]] && echo PASS || echo FAIL)" \
   "session_limits_match_config" "max_hops=30 max_queries=3" "$(jget limits.max_hops)/$(jget limits.max_queries)/$(jget limits.max_execution_ms)"
+protocols=$(python3 -c 'import json,sys;print(",".join(json.load(open(sys.argv[1]))["limits"]["protocols"]))' "$BODY" 2>/dev/null)
+record "$([[ "$protocols" == "icmp,tcp,udp" ]] && echo PASS || echo FAIL)" "session_limits_protocols" "protocols=[icmp tcp udp]" "$protocols"
 record "$(grep -qi 'dev authentication bypass' "$BODY" && echo PASS || echo FAIL)" \
   "dev_mode_warning" "warning about dev bypass in session" "$(jget warnings.0)"
 
@@ -258,6 +260,20 @@ for needle in "$TOKEN_A" "$TOKEN_B" "100.81.98.125" "/etc/tracecat" "TRACECAT_";
   grep -qF -- "$needle" "$BODY" && leak="$leak $needle"
 done
 record "$([[ -z "$leak" ]] && echo PASS || echo FAIL)" "nodes_no_url_or_secret_leak" "no agent URLs/tokens/paths" "${leak:-none}"
+ifaces=$(python3 - "$BODY" >"$TMPD/node-ifaces" 2>&1 <<'PY' && echo PASS || echo FAIL
+import json, sys
+nodes = json.load(open(sys.argv[1]))["nodes"]
+assert len(nodes) == 2, nodes
+for node in nodes:
+    names = node.get("interfaces") or []
+    assert names, f"node {node['id']} advertises no interfaces"
+    assert names == sorted(names), names
+    assert "eth0" in names, names
+    assert not any(n == "lo" or n.startswith(("docker", "veth", "br-", "bridge", "virbr")) for n in names), names
+print("nodes=" + ",".join(f"{n['id']}:{','.join(n['interfaces'])}" for n in nodes))
+PY
+)
+record "$ifaces" "nodes_expose_interfaces" "each node advertises sorted eligible interfaces incl. eth0" "$(cat "$TMPD/node-ifaces")"
 
 # =========================================================================
 section "D. central DNS resolution"
@@ -367,6 +383,18 @@ while [[ $attempts -lt 90 ]]; do
 done
 cp "$BODY" "$TMPD/job.json"
 record "$([[ "$job_status" == "completed" ]] && echo PASS || echo FAIL)" "job_completed" completed "$job_status"
+icmp_shape=$(python3 - "$TMPD/job.json" 2>&1 <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))["job"]
+assert j["protocol"] == "icmp", j["protocol"]
+assert "port" not in j, "icmp job must not carry a port"
+for n in j["nodes"]:
+    assert "port" not in n, (n["node_id"], "icmp node must not echo a port")
+    assert not n.get("interface"), (n["node_id"], n.get("interface"))
+print("icmp job: no port/interface keys, both nodes auto")
+PY
+)
+record "$([[ "$icmp_shape" != *Traceback* ]] && echo PASS || echo FAIL)" "icmp_job_has_no_port_or_interface" "no port/interface keys on icmp" "$icmp_shape"
 nodeinfo=$(python3 - "$TMPD/job.json" <<'PY'
 import json,sys
 j=json.load(open(sys.argv[1]))["job"]
@@ -446,6 +474,223 @@ req GET "/api/v1/jobs/$JOB_ID"
 record "$([[ "$CODE" == 200 && $(jget job.id) == "$JOB_ID" ]] && echo PASS || echo FAIL)" \
   "history_persists_across_restart" "job retrievable after restart" "$CODE id=$(jget job.id)"
 record "$(systemctl is-active --quiet "$UNIT" && echo PASS || echo FAIL)" "controller_restart_healthy" active "$(systemctl is-active "$UNIT")"
+
+# =========================================================================
+section "E2. TCP/UDP and per-node interface dispatch"
+# =========================================================================
+capture_children_loop() { # background: sample live nexttrace children argv
+  local label=$1 argvf="$TMPD/argv-$label" maxf="$TMPD/maxchildren-$label"
+  : >"$argvf"; echo 0 >"$maxf"
+  while [[ -f "$TMPD/capture-$label.on" ]]; do
+    local pids n prev
+    pids=$(pgrep -f '^/usr/local/bin/nexttrace' 2>/dev/null || true)
+    n=$(wc -w <<<"$pids"); n=${n:-0}
+    prev=$(cat "$maxf" 2>/dev/null || echo 0)
+    [[ "$n" -gt "$prev" ]] && echo "$n" >"$maxf"
+    local p
+    for p in $pids; do
+      tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null >>"$argvf" || true
+      echo >>"$argvf"
+    done
+    sleep 0.15
+  done
+}
+start_capture() { local label=$1; touch "$TMPD/capture-$label.on"; capture_children_loop "$label" & CAP_BG=$!; }
+stop_capture() { local label=$1; rm -f "$TMPD/capture-$label.on"; wait "$CAP_BG" 2>/dev/null || true; sort -u "$TMPD/argv-$label" | grep . >"$TMPD/argv-$label.uniq" || true; }
+
+poll_job() { # poll_job <id> ; sets JOB_TERMINAL_STATUS / writes $BODY
+  local id=$1 st="" i=0
+  while [[ $i -lt 120 ]]; do
+    req GET "/api/v1/jobs/$id"
+    st=$(jget job.status)
+    [[ "$st" =~ ^(completed|partial|failed|cancelled)$ ]] && break
+    sleep 1; i=$((i+1))
+  done
+  JOB_TERMINAL_STATUS="$st"
+}
+job_body_ext() { # target protocol port node_interfaces-json hops queries timeout
+  python3 - "$1" "$2" "$3" "$4" "$AGENT_A" "$AGENT_B" "$5" "$6" "$7" <<'PY'
+import json, secrets, sys
+target, protocol, port, ifaces, a, b, hops, queries, timeout = sys.argv[1:10]
+body = {
+    "target_ip": target,
+    "original_target": target,
+    "node_ids": [a, b],
+    "protocol": protocol,
+    "max_hops": int(hops),
+    "queries": int(queries),
+    "timeout_ms": int(timeout),
+    "job_note": secrets.token_hex(8),
+}
+if port != "":
+    body["port"] = int(port)
+sel = json.loads(ifaces)
+if sel:
+    body["node_interfaces"] = sel
+body.pop("job_note", None)
+print(json.dumps(body))
+PY
+}
+
+# ---- TCP/443 across both nodes ------------------------------------------
+restart_ctrl
+start_capture tcp
+req POST /api/v1/jobs "$(job_body_ext 1.1.1.1 tcp 443 '{}' 8 1 40000)"
+TCP_ID=$(jget job.id)
+record "$([[ "$CODE" == 202 ]] && echo PASS || echo FAIL)" "job_create_tcp" 202 "$CODE $(jget job.protocol)/$(jget job.port)"
+poll_job "$TCP_ID"
+cp "$BODY" "$TMPD/job-tcp.json"
+stop_capture tcp
+record "$([[ "$JOB_TERMINAL_STATUS" == completed ]] && echo PASS || echo FAIL)" "tcp_job_completed" completed "$JOB_TERMINAL_STATUS"
+record "$([[ $(cat "$TMPD/maxchildren-tcp") -ge 2 ]] && echo PASS || echo FAIL)" "tcp_dispatched_to_both_nodes" ">=2 concurrent nexttrace children" "max_children=$(cat "$TMPD/maxchildren-tcp")"
+tcp_echo=$(python3 - "$TMPD/job-tcp.json" 2>&1 <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))["job"]
+assert j["protocol"] == "tcp" and j["port"] == 443, (j["protocol"], j["port"])
+for n in j["nodes"]:
+    assert n["status"] == "completed", (n["node_id"], n["status"])
+    assert "port" not in n, "node results are job-level port only"
+    assert not n.get("interface"), n.get("interface")
+print("tcp job: protocol=tcp port=443, both completed, no per-node port/interface")
+PY
+)
+record "$([[ "$tcp_echo" != *Traceback* ]] && echo PASS || echo FAIL)" "tcp_job_echo_and_contract" "protocol=tcp port=443, both completed" "$tcp_echo"
+tcp_argv_ok=0
+if [[ -s "$TMPD/argv-tcp.uniq" ]]; then
+  while IFS= read -r line; do
+    if python3 "$(dirname "$0")/check_argv.py" "$line" --protocol tcp --port 443 --target 1.1.1.1 --family ipv4 >"$TMPD/argvcheck-tcp" 2>&1; then tcp_argv_ok=1; fi
+  done <"$TMPD/argv-tcp.uniq"
+fi
+record "$([[ $tcp_argv_ok -eq 1 ]] && echo PASS || echo FAIL)" "tcp_child_argv_exact" "-4 -T ... -p 443 target" "$(tail -1 "$TMPD/argvcheck-tcp" 2>/dev/null): $(head -1 "$TMPD/argv-tcp.uniq" 2>/dev/null | cut -c1-120)"
+
+# ---- UDP/33494 across both nodes ----------------------------------------
+start_capture udp
+req POST /api/v1/jobs "$(job_body_ext 1.1.1.1 udp 33494 '{}' 8 1 40000)"
+UDP_ID=$(jget job.id)
+record "$([[ "$CODE" == 202 ]] && echo PASS || echo FAIL)" "job_create_udp" 202 "$CODE $(jget job.protocol)/$(jget job.port)"
+poll_job "$UDP_ID"
+cp "$BODY" "$TMPD/job-udp.json"
+stop_capture udp
+record "$([[ "$JOB_TERMINAL_STATUS" == completed ]] && echo PASS || echo FAIL)" "udp_job_completed" completed "$JOB_TERMINAL_STATUS"
+udp_argv_ok=0
+if [[ -s "$TMPD/argv-udp.uniq" ]]; then
+  while IFS= read -r line; do
+    if python3 "$(dirname "$0")/check_argv.py" "$line" --protocol udp --port 33494 --target 1.1.1.1 --family ipv4 >"$TMPD/argvcheck-udp" 2>&1; then udp_argv_ok=1; fi
+  done <"$TMPD/argv-udp.uniq"
+fi
+record "$([[ $udp_argv_ok -eq 1 ]] && echo PASS || echo FAIL)" "udp_child_argv_exact" "-4 -U ... -p 33494 target" "$(tail -1 "$TMPD/argvcheck-udp" 2>/dev/null): $(head -1 "$TMPD/argv-udp.uniq" 2>/dev/null | cut -c1-120)"
+
+# ---- per-node interface selection (A=eth0, B=automatic) -----------------
+start_capture iface
+req POST /api/v1/jobs "$(job_body_ext 1.1.1.1 icmp "" "{\"$AGENT_A\":\"eth0\"}" 5 1 30000)"
+IFACE_ID=$(jget job.id)
+record "$([[ "$CODE" == 202 ]] && echo PASS || echo FAIL)" "job_create_interface" 202 "$CODE"
+poll_job "$IFACE_ID"
+cp "$BODY" "$TMPD/job-iface.json"
+stop_capture iface
+iface_echo=$(python3 - "$TMPD/job-iface.json" "$AGENT_A" "$AGENT_B" 2>&1 <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))["job"]
+a, b = sys.argv[2], sys.argv[3]
+by = {n["node_id"]: n for n in j["nodes"]}
+assert by[a]["interface"] == "eth0", by[a].get("interface")
+assert not by[b].get("interface"), by[b].get("interface")
+assert "interface" not in j, "job level must not carry a single interface"
+assert all(n["status"] == "completed" for n in j["nodes"]), [n["status"] for n in j["nodes"]]
+print("node A interface=eth0, node B automatic, both completed")
+PY
+)
+record "$([[ "$iface_echo" != *Traceback* ]] && echo PASS || echo FAIL)" "interface_job_echo" "per-node interface echoed, mismatch isolated" "$iface_echo"
+iface_flag=0; auto_flag=0
+while IFS= read -r line; do
+  [[ "$line" == *"-D eth0"* ]] && iface_flag=1
+  [[ "$line" != *"-D "* ]] && auto_flag=1
+  python3 "$(dirname "$0")/check_argv.py" "$line" --protocol icmp --target 1.1.1.1 --family ipv4 >/dev/null 2>&1 || true
+done <"$TMPD/argv-iface.uniq"
+record "$([[ $iface_flag -eq 1 && $auto_flag -eq 1 ]] && echo PASS || echo FAIL)" "interface_child_argv_mixed" "one child -D eth0, one child auto (no -D)" "iface_line=$iface_flag auto_line=$auto_flag lines=$(wc -l <"$TMPD/argv-iface.uniq" 2>/dev/null || echo 0)"
+
+# ---- Controller protocol allowlist (independent instance) ---------------
+PROTO_CFG="$TMPD/controller-icmp-only.json"
+python3 - "$CONFIG" "$PROTO_CFG" "$TMPD/proto.db" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+cfg["listen"] = "127.0.0.1:8098"
+cfg["public_origin"] = "http://127.0.0.1:8098"
+cfg["database"] = {"path": sys.argv[3], "max_history_jobs": 10}
+cfg["limits"]["allowed_protocols"] = ["icmp"]
+json.dump(cfg, open(sys.argv[2], "w"), indent=2)
+PY
+TRACECAT_AGENT_TOKEN_1="$TOKEN_A" TRACECAT_AGENT_TOKEN_2="$TOKEN_B" \
+  /usr/local/bin/tracecat-controller -config "$PROTO_CFG" >"$TMPD/proto-controller.log" 2>&1 &
+PROTO_PID=$!
+proto_up=0
+for _ in $(seq 1 40); do
+  if curl -sS -m 1 -o "$TMPD/proto-session.json" http://127.0.0.1:8098/api/v1/session 2>/dev/null; then proto_up=1; break; fi
+  sleep 0.25
+done
+record "$([[ $proto_up -eq 1 ]] && echo PASS || echo FAIL)" "controller_protocol_allowlist_instance" "temporary controller with allowed_protocols=[icmp]" "up=$proto_up"
+if [[ $proto_up -eq 1 ]]; then
+  proto_csrf=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["csrf_token"])' "$TMPD/proto-session.json")
+  proto_protocols=$(python3 -c 'import json,sys;print(",".join(json.load(open(sys.argv[1]))["limits"]["protocols"]))' "$TMPD/proto-session.json")
+  record "$([[ "$proto_protocols" == "icmp" ]] && echo PASS || echo FAIL)" "controller_protocol_allowlist_session" "session limits.protocols=[icmp]" "$proto_protocols"
+  pcode=$(curl -sS -m 10 -o "$TMPD/proto-reject.json" -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/json' -H 'Origin: http://127.0.0.1:8098' -H "X-TraceCat-CSRF: $proto_csrf" \
+    --data-binary "$(job_body_ext 1.1.1.1 tcp 443 '{}' 5 1 30000)" http://127.0.0.1:8098/api/v1/jobs 2>/dev/null || true)
+  pchildren=$(pgrep -cf '^/usr/local/bin/nexttrace' || true)
+  record "$([[ "$pcode" == 400 && ${pchildren:-0} -eq 0 ]] && echo PASS || echo FAIL)" \
+    "controller_protocol_allowlist_rejects_tcp" "400 before dispatch, no child" "$pcode $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("error",{}).get("code",""))' "$TMPD/proto-reject.json") children=${pchildren:-0}"
+  pcode=$(curl -sS -m 10 -o "$TMPD/proto-ok.json" -w '%{http_code}' -X POST \
+    -H 'Content-Type: application/json' -H 'Origin: http://127.0.0.1:8098' -H "X-TraceCat-CSRF: $proto_csrf" \
+    --data-binary "$(job_body_ext 1.1.1.1 icmp "" '{}' 2 1 10000)" http://127.0.0.1:8098/api/v1/jobs 2>/dev/null || true)
+  record "$([[ "$pcode" == 202 ]] && echo PASS || echo FAIL)" "controller_protocol_allowlist_allows_icmp" 202 "$pcode"
+fi
+kill "$PROTO_PID" 2>/dev/null || true
+wait "$PROTO_PID" 2>/dev/null || true
+rm -f "$PROTO_CFG" "$TMPD"/proto.db*
+
+# ---- Controller-side port/interface rejection matrix --------------------
+restart_ctrl
+for _ in $(seq 1 60); do pgrep -f '^/usr/local/bin/nexttrace' >/dev/null 2>&1 || break; sleep 0.5; done
+port_job() { # port_job <protocol> <port-token> <ifaces-json>
+  python3 - "$1" "$2" "$3" "$AGENT_A" "$AGENT_B" <<'PY'
+import json, sys
+protocol, port, ifaces, a, b = sys.argv[1:6]
+body = {"target_ip": "1.1.1.1", "node_ids": [a, b], "protocol": protocol,
+        "max_hops": 5, "queries": 1, "timeout_ms": 30000}
+if port != "":
+    body["port"] = port[4:] if port.startswith("str:") else int(port)
+sel = json.loads(ifaces)
+if sel:
+    body["node_interfaces"] = sel
+print(json.dumps(body))
+PY
+}
+for entry in \
+  "tcp_missing_port|$(port_job tcp "" '{}')|400" \
+  "tcp_port_zero|$(port_job tcp 0 '{}')|400" \
+  "tcp_port_too_high|$(port_job tcp 65536 '{}')|400" \
+  "tcp_port_string|$(port_job tcp str:443 '{}')|400" \
+  "udp_missing_port|$(port_job udp "" '{}')|400" \
+  "icmp_with_port|$(port_job icmp 443 '{}')|400" \
+  "invalid_protocol|$(port_job sctp "" '{}')|400" \
+  "interface_loopback|$(port_job icmp "" "{\"$AGENT_A\":\"lo\"}")|400" \
+  "interface_not_advertised|$(port_job icmp "" "{\"$AGENT_A\":\"eth9\"}")|400" \
+  "interface_invalid_name|$(port_job icmp "" "{\"$AGENT_A\":\"bad iface!\"}")|400" \
+  "interface_unselected_node|$(python3 - "$AGENT_A" "$AGENT_B" <<'PY'
+import json, sys
+a, b = sys.argv[1], sys.argv[2]
+print(json.dumps({"target_ip": "1.1.1.1", "node_ids": [a], "protocol": "icmp",
+                  "node_interfaces": {b: "eth0"}, "max_hops": 5, "queries": 1,
+                  "timeout_ms": 30000}))
+PY
+)|400" \
+  "interface_unknown_node|$(port_job icmp "" '{"nope-1":"eth0"}')|400" ; do
+  name=${entry%%|*}; rest=${entry#*|}; body=${rest%|*}; want=${rest##*|}
+  req POST /api/v1/jobs "$body"
+  children=$(pgrep -cf '^/usr/local/bin/nexttrace' || true)
+  record "$([[ "$CODE" == "$want" && ${children:-0} -eq 0 ]] && echo PASS || echo FAIL)" \
+    "job_reject[$name]" "$want before dispatch, no child" "$CODE $(jget error.code) children=${children:-0}"
+done
 
 # =========================================================================
 section "F. cancellation across both Agents"

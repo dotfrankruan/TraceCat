@@ -12,6 +12,7 @@ artifacts live under `verify/`.
 | --- | --- | --- |
 | 1 | Agent: unprivileged systemd deployment on the tailnet, real NextTrace execution, adversarial HTTP matrix | **PASS** (126 PASS / 0 FAIL / 1 informational SKIP) |
 | 2 | Controller + dashboard end-to-end over an SSH tunnel: DNS, multi-node jobs, SSE, export, history, cancellation, restart reconciliation, allowlist, local auth/CSRF/sessions, headless-Chrome screenshots | **PASS** (125 + 61 + 17 PASS / 0 + 0 + 0 FAIL, 1 N/A) |
+| v0.1.1 delta (§13) | TCP/UDP + bounded ports, per-node interface selection, generic private bind policy, one-command installer + local release packaging | **PASS** (408 PASS / 0 FAIL / 3 informational SKIP) |
 | **Total** | | **329 PASS / 0 FAIL / 2 SKIP** |
 
 ## 0. Environment and artifacts
@@ -1209,3 +1210,745 @@ The services are left running on the test host (`tracecat-agent`,
 `tracecat-agent-b`, `tracecat-controller`, `tracecat-controller-local`) for
 follow-up inspection. All secrets remain on the host; nothing in this
 repository or this report contains a token or password.
+
+## 13. v0.1.1 delta verification — TCP/UDP, interfaces, private bind, installer
+
+### 13.1 Scope and verified SHA
+
+Delta verification for the v0.1.1 feature batch on top of the v0.1.0 report
+(§§0–12 above are historical and unchanged):
+
+| Item | Value |
+| --- | --- |
+| Verified production code | Go/agent/controller sources are **unchanged since `bc98212`** (`git diff bc98212..<installer-fix HEAD> -- '*.go' internal cmd` is empty); the only code touched afterwards was `deploy/install.sh`, `deploy/install_test.sh`, `scripts/build-release.sh`, CI workflows and docs |
+| Verified installer / packaging SHA | `2d27ee3751a1f3dc20e887961543630ae24f3262` (`2d27ee3`) — includes the three installer fixes below |
+| Delta commits reviewed | `2a1aef1`…`bc98212` (contracts, TCP/UDP, interfaces, controller dispatch, dashboard, install.sh, CI release, release packaging) and `a3e02a1`, `8385e46`, `ff254fd`, `2d27ee3` (installer fixes) |
+| Binaries rebuilt at final SHA | agent `sha256 5c09b8034d003f0c…`, controller `sha256 e0b7f73d3f9cb286…` (built by `scripts/build-release.sh 0.1.1 amd64` and by `verify/setup-testhost-*.sh`); Go code identical to `bc98212` where the agent/controller suites below were run |
+| Host | Debian 13, systemd 257, Tailscale 1.104.4, NextTrace v1.7.3 on `100.81.98.125` |
+| Release artifacts | local `dist/tracecat-{agent,controller}-linux-amd64.tar.gz` + `checksums.txt` (VERSION=0.1.1, layout `bin/`, `install.sh`, `deploy/systemd/`); **GitHub-release download path not exercised — v0.1.1 is not tagged yet** (Lead will do a post-tag asset smoke; the offline `--tarball/--checksums` path is the same code) |
+| Totals for this delta | **408 PASS / 0 FAIL / 3 SKIP** (Agent 174, Controller 155, installer 61, browser 18) |
+
+### 13.2 New behaviour verified
+
+| Feature | Evidence |
+| --- | --- |
+| Agent config schema | `security.allow_public_bind` + top-level `interfaces.{exclude,include}`; old `require_tailscale_bind`/`allow_non_tailscale_bind` removed and rejected as unknown fields; unit no longer hard-requires `tailscaled` |
+| TCP/UDP probes | real traces to `1.1.1.1` via both Agents: TCP/443 and UDP/33494 completed; response echoes `protocol` and `port`; ICMP stays port-free; live child argv exactly `-4 -T ... -p 443 <target>`, `-4 -U ... -p 33494 <target>` (fixed positions, target last) |
+| Port contract | missing port, 0, 65536, negative, JSON string, and port-on-icmp all `400 invalid_request` with no child process; agent-level and controller-level |
+| Protocol allowlists | Agent instance with `allowed_protocols=[icmp]` advertises `limits.protocols=[icmp]` and rejects TCP/UDP `400` before exec; temporary Controller with `limits.allowed_protocols=[icmp]` rejects TCP at dispatch (`400`, no child) and accepts ICMP |
+| Interface selection | `/v1/health` advertises sorted `["eth0","tailscale0"]` (loopback/docker/veth/bridge excluded); Controller `/nodes` exposes the list; a job with `node_interfaces:{"debian-test-1":"eth0"}` dispatches `-D eth0` for that node only, echoes `interface=eth0` on that node and automatic routing on the other (argv `-D eth0` present for exactly one child); invalid/loopback/not-advertised/traversal names `400` before exec at both layers |
+| Generic private bind policy | accepted: loopback, RFC1918, CGNAT/Tailscale, ULA (binds + health 200); rejected: wildcard v4/v6, empty host, hostname, multicast, unassigned, and a globally routable address unless `security.allow_public_bind=true` (which binds and logs a warning); missing/short token still fails closed |
+| Installer / release packaging | shipped `deploy/install_test.sh` passes on Debian bash 5.2; fresh Agent install from tarball (`--no-start` honoured, generated strict config, 0600 token, binds + auth, health protocols/interfaces); Controller installs in dev and local modes; checksum mismatch and wrong-contents tarballs refused without replacing the binary; upgrade keeps existing config/env byte-identical and advances the binary; missing Agent token env writes commented placeholders, does not start the service and leaves no listener |
+| Browser UI | protocol selector (ICMP/TCP/UDP), TCP port input, per-node interface dropdowns, `tcp/443` job with `iface eth0` / `iface auto` chips and 60 hop rows across both nodes, UDP/33494 run, 390px mobile layout; 0 console errors / 0 uncaught exceptions / 0 CSP violations |
+
+### 13.3 Defects found during this delta (all fixed and re-verified)
+
+All three were in `deploy/install.sh` (new in v0.1.1) and blocked the
+one-command installer; the shipped suite is green at `2d27ee3`.
+
+| # | Severity | Symptom | Root cause | Fix | Re-verified |
+| --- | --- | --- | --- | --- | --- |
+| D4 | P1 | Controller install with any `--agent` failed: `invalid agent url` | non-portable ERE bracket class `[A-Za-z0-9._:\-\[\]/]` never matches on bash 3.2/5.2 | `8385e46`: portable `[][A-Za-z0-9._:/-]` class + `deploy/install_test.sh` in CI | Yes — shipped `install_test.sh` PASS, live install passes |
+| D5 | P1 | Controller install with any `--public-origin` failed: `invalid --public-origin` | same escaped-bracket class on the public-origin check | `ff254fd`: portable class + public-origin matrix in `install_test.sh` | Yes — class matrix + live install start |
+| D6 | P1 | Successful dev/local Controller install exited 1 | trailing `[[ "$AUTH_MODE" == "cloudflare" ]] && log …` as last command of the success branch under `set -e` | `2d27ee3`: if-block, explicit `return 0`, root-free `--help`, exit-status tests | Yes — installer suite now 61/61 PASS |
+
+Minimal reproductions used (kept for the record):
+
+```bash
+# D4 (pre-8385e46)
+bash deploy/install.sh controller --auth dev --listen 127.0.0.1:8080 \
+  --public-origin http://127.0.0.1:18090 \
+  --agent node-1,http://10.0.0.5:8443,TRACECAT_AGENT_TOKEN
+# -> [tracecat] ERROR: invalid agent url: http://10.0.0.5:8443
+
+# D5 (pre-ff254fd) — after D4 fix, same command got further:
+# -> [tracecat] ERROR: invalid --public-origin
+
+# D6 (pre-2d27ee3) — install succeeded and the service was healthy, but:
+# -> [tracecat] tracecat-controller enabled and started ... exit status 1
+[[ "http://10.0.0.5:8443" =~ ^https?://[A-Za-z0-9._:\-\[\]/]+/?$ ]]; echo $?   # 1 (never matches)
+```
+
+### 13.4 Results
+
+Agent suite (`verify/agent-remote-verify.sh`, extended for the new schema,
+protocols/ports, interfaces and the bind matrix) — **174 PASS / 0 FAIL / 2 SKIP**:
+
+#### A. deployment posture
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| A1 | `unit_enabled` | enabled | `enabled` | PASS |
+| A2 | `unit_active` | active | `active` | PASS |
+| A3 | `runs_as_unprivileged` | User=tracecat | `tracecat` | PASS |
+| A4 | `no_new_privileges` | yes | `yes` | PASS |
+| A5 | `ambient_cap_net_raw` | cap_net_raw | `cap_net_raw` | PASS |
+| A6 | `capability_bounding_set` | cap_net_raw | `cap_net_raw` | PASS |
+| A7 | `protect_system` | strict | `strict` | PASS |
+| A8 | `private_tmp` | yes | `yes` | PASS |
+| A9 | `memory_deny_write_execute` | disabled (nexttrace needs W+X or it SIGSEGVs) | `no` | PASS |
+| A10 | `binds_only_tailscale_ip` | single 100.81.98.125:8443 | `100.81.98.125:8443` | PASS |
+| A11 | `no_wildcard_bind` | no 0.0.0.0/:: listener | `100.81.98.125:8443` | PASS |
+| A12 | `not_reachable_on_public_ip` | no HTTP 200 on public IP | `code=000` | PASS |
+| A13 | `config_permissions` | 640 root:tracecat | `640 root:tracecat` | PASS |
+| A14 | `secret_file_permissions` | 600 root:root | `600 root:root` | PASS |
+| A15 | `token_entropy_length` | >=32 bytes | `len=64` | PASS |
+| A16 | `agent_process_user` | tracecat | `tracecat` | PASS |
+
+#### B. authentication
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| B1 | `auth_missing_token` | 401 | `401 unauthorized` | PASS |
+| B2 | `auth_challenge_header` | WWW-Authenticate: Bearer | `Bearer` | PASS |
+| B3 | `auth_wrong_token` | 401 | `401 unauthorized` | PASS |
+| B4 | `auth_wrong_scheme` | 401 | `401 unauthorized` | PASS |
+| B5 | `auth_empty_bearer` | 401 | `401 unauthorized` | PASS |
+| B6 | `auth_before_routing` | 401 on unknown path without token | `401` | PASS |
+| B7 | `health_with_token` | 200 | `200` | PASS |
+| B8 | `health_schema` | tracecat.agent.v1 | `tracecat.agent.v1` | PASS |
+| B9 | `health_status_ok` | ok (nexttrace usable) | `ok nexttrace.available=True err=` | PASS |
+| B10 | `health_node_id` | debian-test-1 | `debian-test-1` | PASS |
+| B11 | `health_limits` | max_timeout_ms=60000 max_concurrent=4 | `60000/4` | PASS |
+| B12 | `health_time_format` | RFC3339Nano | `ok` | PASS |
+| B13 | `health_limits_protocols` | protocols=[icmp tcp udp] | `['icmp', 'tcp', 'udp']` | PASS |
+| B14 | `health_capabilities_extended` | detected tcp/udp/port/device | `device,ipv4,ipv6,json,max_hops,port,queries,tcp,timeout,udp` | PASS |
+| B15 | `health_interfaces_eligible` | sorted, excludes lo/docker/veth/bridge, includes eth0 | `ok ['eth0', 'tailscale0']` | PASS |
+| B16 | `health_no_secret_or_path_leak` | no token/path/env | `none` | PASS |
+| B17 | `security_headers` | application/json + nosniff + no-store | `Cache-Control: no-store;Content-Type: application/json;X-Content-Type-Options: nosniff` | PASS |
+
+#### C. HTTP method handling
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| C1 | `trace_get_method` | 405 | `405 Allow=POST` | PASS |
+| C2 | `health_post_method` | 405 | `405 Allow=GET` | PASS |
+| C3 | `trace_put_method` | 405 | `405 Allow=POST` | PASS |
+| C4 | `unauth_unaffected_by_method_check` | 401 first | `401` | PASS |
+
+#### D. strict JSON / schema / limits
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| D1 | `valid_request_reaches_trace` | 200 (terminal status inside) | `200 status=completed err=` | PASS |
+| D2 | `json_unknown_field` | 400 invalid_request | `400 invalid_request` | PASS |
+| D3 | `json_trailing_data` | 400 invalid_request | `400 invalid_request` | PASS |
+| D4 | `wrong_schema_version` | 400 unsupported_schema_version | `400 unsupported_schema_version` | PASS |
+| D5 | `bad_job_id` | 400 | `400 invalid_request` | PASS |
+| D6 | `wrong_node_id` | 403 forbidden | `403 forbidden` | PASS |
+| D7 | `bad_family` | 400 | `400 invalid_request` | PASS |
+| D8 | `bad_protocol` | 400 (tcp not in MVP) | `400 invalid_request` | PASS |
+| D9 | `max_hops_zero` | 400 | `400 invalid_request` | PASS |
+| D10 | `max_hops_above_global_max` | 400 | `400 invalid_request` | PASS |
+| D11 | `queries_zero` | 400 | `400 invalid_request` | PASS |
+| D12 | `queries_above_global_max` | 400 | `400 invalid_request` | PASS |
+| D13 | `timeout_below_min` | 400 | `400 invalid_request` | PASS |
+| D14 | `timeout_above_agent_max` | 400 (agent max 60000) | `400 invalid_request` | PASS |
+| D15 | `family_target_mismatch` | 400 | `400 invalid_request` | PASS |
+
+#### E. target rejection (injection / SSRF policy)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| E1 | `inject_reject[hostname]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E2 | `inject_reject[semicolon_cmd]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E3 | `inject_reject[dollar_paren]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E4 | `inject_reject[backticks]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E5 | `inject_reject[flag_help]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E6 | `inject_reject[flag_family]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E7 | `inject_reject[flag_output]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E8 | `inject_reject[bracketed_v6]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E9 | `inject_reject[zoned_v6]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E10 | `inject_reject[mapped_v6]` | 4xx target_rejected/invalid_request | `400 invalid_request` | PASS |
+| E11 | `inject_reject[private_10]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E12 | `inject_reject[private_172]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E13 | `inject_reject[private_192]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E14 | `inject_reject[metadata_linklocal]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E15 | `inject_reject[documentation_203]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E16 | `inject_reject[documentation_198]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E17 | `inject_reject[cgnat_100_64]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E18 | `inject_reject[unspecified]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E19 | `inject_reject[multicast]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E20 | `inject_reject[loopback_v6]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E21 | `inject_reject[documentation_v6]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E22 | `inject_reject[with_port]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E23 | `inject_reject[url]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E24 | `inject_reject[trailing_space]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E25 | `inject_reject[newline]` | 4xx target_rejected/invalid_request | `400 invalid_request` | PASS |
+| E26 | `no_injection_side_effect` | /tmp/tracecat-pwned absent | `absent` | PASS |
+| E27 | `no_child_ran_for_rejected_targets` | no nexttrace process | `none` | PASS |
+| E28 | `allowed_target_still_reaches_runner` | 200 | `200 status=completed` | PASS |
+
+#### F. content type and body size
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| F1 | `content_type_text_plain` | 415 | `415 invalid_request` | PASS |
+| F2 | `content_type_missing` | 415 | `415 invalid_request` | PASS |
+| F3 | `content_type_with_charset` | 200 | `200 status=completed` | PASS |
+| F4 | `body_over_64kib` | 413 payload_too_large | `413 payload_too_large size=71904` | PASS |
+| F5 | `empty_body` | 400 | `400 invalid_request` | PASS |
+
+#### G. rate limiting
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| G1 | `burst_rate_limit` | >=1x 429 among 16 rapid requests | `codes=200 200 200 200 200 200 200 200 200 429 429 429 429 429 429 429` | PASS |
+| G2 | `rate_limit_envelope` | 429 rate_limited | `429 rate_limited retry_after=1` | PASS |
+| G3 | `rate_limit_retry_after` | numeric seconds | `1` | PASS |
+
+#### H. platform caveat: ICMP reachability from this vantage point
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| H1 | `icmp_ttl_exceeded_available` | informational | `ping -t 1: 1 packets transmitted, 0 received, 100% packet loss, time 0ms` | SKIP (informational) |
+
+#### I. real traces and capability proof
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| I1 | `real_trace_ipv4_http` | 200 | `200` | PASS |
+| I2 | `real_trace_ipv4_contract` | all wire checks pass | `SUMMARY 46/46 checks passed` | PASS |
+| I3 | `real_trace_ipv4_detail` | >=20 sub-checks | `SUMMARY 46/46 checks passed` | PASS |
+| I4 | `real_trace_ipv6_http` | 200 | `200 status=completed` | PASS |
+| I5 | `real_trace_ipv6_contract` | all wire checks pass | `SUMMARY 45/45 checks passed` | PASS |
+| I6 | `cap_net_raw_effective` | CAP_NET_RAW set, uid tracecat | `uid=tracecat CapEff=0000000000002000 CapAmb=0000000000002000 net_raw=yes` | PASS |
+| I7 | `child_env_minimal` | no token/config/env leak | `leak=none keys=HOME,LANG,LC_ALL,NO_COLOR,PATH` | PASS |
+| I8 | `raw_socket_child_running` | nexttrace alive (no permission abort) | `pid=3637178` | PASS |
+| I9 | `cancellation_kills_process_group` | no nexttrace within 12s of client disconnect | `reaped` | PASS |
+| I10 | `cancellation_logged` | journal status=cancelled | `status=cancelled` | PASS |
+| I11 | `agent_survives_cancel` | active | `active` | PASS |
+| I12 | `concurrency_503` | 503 busy when 4 traces in flight | `503 busy children=4` | PASS |
+| I13 | `agent_recovers_after_load` | 200 health | `200` | PASS |
+
+#### P. probe protocols, ports and interfaces
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| P1 | `protocol_section_precondition` | agent ok | `ok` | PASS |
+| P2 | `icmp_regression_http` | 200 | `200` | PASS |
+| P3 | `icmp_argv_exact` | no -T/-U/-p/-D | `SUMMARY 20/20 argv checks passed` | PASS |
+| P4 | `icmp_contract_regression` | wire contract | `SUMMARY 45/45 checks passed` | PASS |
+| P5 | `real_tcp_trace_http` | 200 | `200` | PASS |
+| P6 | `tcp_argv_exact` | -4 -T ... -p 443 target | `SUMMARY 20/20 argv checks passed` | PASS |
+| P7 | `tcp_contract` | completed, port echoed, no ansiterm | `SUMMARY 45/45 checks passed` | PASS |
+| P8 | `tcp_completed` | completed | `completed hops= 8` | PASS |
+| P9 | `real_udp_trace_http` | 200 | `200` | PASS |
+| P10 | `udp_argv_exact` | -4 -U ... -p 33494 target | `SUMMARY 20/20 argv checks passed` | PASS |
+| P11 | `udp_contract` | completed, port echoed | `SUMMARY 45/45 checks passed` | PASS |
+| P12 | `real_icmp_interface_http` | 200 | `200` | PASS |
+| P13 | `interface_argv_exact` | -4 -D eth0 ... target | `SUMMARY 20/20 argv checks passed` | PASS |
+| P14 | `interface_contract` | interface echoed | `SUMMARY 45/45 checks passed` | PASS |
+| P15 | `real_tcp_interface_http` | 200 | `200` | PASS |
+| P16 | `tcp_interface_argv_exact` | -4 -T -D tailscale0 ... -p 443 target | `SUMMARY 20/20 argv checks passed` | PASS |
+| P17 | `tcp_interface_contract` | interface+port echoed | `SUMMARY 45/45 checks passed` | PASS |
+| P18 | `trace_reject[tcp_missing_port]` | 400 invalid_request, no child | `400 invalid_request children=0` | PASS |
+| P19 | `trace_reject[tcp_port_zero]` | 400 invalid_request, no child | `400 invalid_request children=0` | PASS |
+| P20 | `trace_reject[tcp_port_too_high]` | 400 invalid_request, no child | `400 invalid_request children=0` | PASS |
+| P21 | `trace_reject[tcp_port_string]` | 400 invalid_request, no child | `400 invalid_request children=0` | PASS |
+| P22 | `trace_reject[tcp_port_negative]` | 400 invalid_request, no child | `400 invalid_request children=0` | PASS |
+| P23 | `trace_reject[udp_missing_port]` | 400 invalid_request, no child | `400 invalid_request children=0` | PASS |
+| P24 | `trace_reject[icmp_with_port]` | 400 invalid_request, no child | `400 invalid_request children=0` | PASS |
+| P25 | `trace_reject[invalid_protocol_sctp]` | 400 invalid_request, no child | `400 invalid_request children=0` | PASS |
+| P26 | `trace_reject[invalid_protocol_case]` | 400 invalid_request, no child | `400 invalid_request children=0` | PASS |
+| P27 | `interface_reject[loopback]` | 400 invalid_request, no child | `400 invalid_request iface=lo children=0` | PASS |
+| P28 | `interface_reject[container]` | 400 invalid_request, no child | `400 invalid_request iface=docker0 children=0` | PASS |
+| P29 | `interface_reject[missing]` | 400 invalid_request, no child | `400 invalid_request iface=eth9 children=0` | PASS |
+| P30 | `interface_reject[invalid_chars]` | 400 invalid_request, no child | `400 invalid_request iface=bad iface! children=0` | PASS |
+| P31 | `interface_reject[too_long]` | 400 invalid_request, no child | `400 invalid_request iface=abcdefghijklmnop children=0` | PASS |
+| P32 | `interface_reject[path_traversal]` | 400 invalid_request, no child | `400 invalid_request iface=../../etc/passwd children=0` | PASS |
+| P33 | `icmp_only_agent_started` | temporary loopback agent with allowed_protocols=[icmp] | `up=1` | PASS |
+| P34 | `agent_protocol_allowlist_health` | limits.protocols=[icmp] | `icmp` | PASS |
+| P35 | `agent_protocol_allowlist[tcp]` | 400, no child executed | `400 invalid_request children=0` | PASS |
+| P36 | `agent_protocol_allowlist[udp]` | 400, no child executed | `400 invalid_request children=0` | PASS |
+| P37 | `agent_protocol_allowlist[icmp_allowed]` | 200 (execution outcome reported in status) | `200 failed nexttrace_failed` | PASS |
+| P38 | `no_stray_temp_listeners` | none | `none` | PASS |
+
+#### J. bind policy matrix (generic private networking)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| J1 | `bind_matrix_environment` | informational | `priv_v4=10.0.0.12 ula_v6=fd7a:115c:a1e0::4d2f:627e public_v6=2402:4e00:c032:3d00:26f6:499a:101c:0` | SKIP (informational) |
+| J2 | `unit_no_tailscaled_hard_dependency` | no Requires=tailscaled (any private overlay works) | `sysinit.target system.slice` | PASS |
+| J3 | `agent_config_new_schema` | allow_public_bind + interfaces, no tailscale flags | `new schema: allow_public_bind=false, interfaces present, no tailscale keys` | PASS |
+| J4 | `bind_accept[loopback]` | binds and serves health | `healthz=200 listen=127.0.0.1:9461 allow_public=false` | PASS |
+| J5 | `bind_accept[rfc1918]` | binds and serves health | `healthz=200 listen=10.0.0.12:9462 allow_public=false` | PASS |
+| J6 | `bind_accept[cgnat]` | binds and serves health | `healthz=200 listen=100.81.98.125:9463 allow_public=false` | PASS |
+| J7 | `bind_accept[ula_v6]` | binds and serves health | `healthz=200 listen=[fd7a:115c:a1e0::4d2f:627e]:9464 allow_public=false` | PASS |
+| J8 | `bind_refuse[wildcard_v4]` | refused: wildcard binds are refused | `rc=exited error="listen: wildcard binds are refused; configure an explicit local address"` | PASS |
+| J9 | `bind_refuse[wildcard_v6]` | refused: wildcard binds are refused | `rc=exited error="listen: wildcard binds are refused; configure an explicit local address"` | PASS |
+| J10 | `bind_refuse[empty_host]` | refused: wildcard binds are refused | `rc=exited error="listen: wildcard binds are refused; configure an explicit local address"` | PASS |
+| J11 | `bind_refuse[hostname]` | refused: numeric IP address | `rc=exited error="listen: listen host must be a numeric IP address (hostnames are not accepted)"` | PASS |
+| J12 | `bind_refuse[multicast]` | refused: multicast | `rc=exited error="listen: multicast listen addresses are not accepted"` | PASS |
+| J13 | `bind_refuse[unassigned]` | refused: is not assigned | `rc=exited error="listen address 10.0.0.99 is not assigned to any local interface"` | PASS |
+| J14 | `bind_refuse[public_refused]` | refused: globally routable | `rc=exited error="listen address 2402:4e00:c032:3d00:26f6:499a:101c:0 is globally routable; set security.allow_public_bind=true to bind a public address"` | PASS |
+| J15 | `bind_accept[public_allowed]` | binds and serves health | `healthz=200 listen=[2402:4e00:c032:3d00:26f6:499a:101c:0]:9472 allow_public=true` | PASS |
+| J16 | `public_bind_logs_warning` | warning when binding a public address | `level=WARN msg="listening on a publicly routable address because security.allow_public_bind=true"` | PASS |
+| J17 | `bind_refuse[missing_token]` | startup fails without the token env | `rc=1 error="auth.token_env \"` | PASS |
+| J18 | `bind_refuse[short_token]` | startup fails with a short token | `rc=1 error="auth.token_env \"` | PASS |
+| J19 | `no_stray_listener_from_bind_tests` | only the main service listener on 8443 | `100.81.98.125:8443` | PASS |
+
+#### K. restart resilience and journal hygiene
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| K1 | `restart_active` | active | `active` | PASS |
+| K2 | `restart_bind_unchanged` | 100.81.98.125:8443 | `100.81.98.125:8443` | PASS |
+| K3 | `restart_auth_and_health` | 200 with token | `200` | PASS |
+| K4 | `restart_still_requires_token` | 401 without token | `401` | PASS |
+| K5 | `journal_no_secret_or_path_leak` | no token/config path/binary path | `none` | PASS |
+| K6 | `journal_clean_no_warn_error` | no WARN/ERROR lines | `` | PASS |
+
+#### L. graceful shutdown reaps in-flight traces
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| L1 | `child_running_before_shutdown` | >=1 nexttrace child | `children=1` | PASS |
+| L2 | `shutdown_reaps_children` | service stopped, no orphan nexttrace | `stopped=1 orphans=none` | PASS |
+| L3 | `shutdown_logged` | journal 'shutdown requested; cancelling in-flight traces' | `shutdown requested; cancelling in-flight traces` | PASS |
+| L4 | `healthy_after_shutdown_cycle` | 200 | `200` | PASS |
+
+#### M. transport hardening (slowloris / header size / auth edges)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| M1 | `read_header_timeout_5s` | connection closed by server ~5s on incomplete headers | `closed_after=5.0s bytes=0` | PASS |
+| M2 | `max_header_bytes` | 431 for ~40KiB header | `code=431` | PASS |
+| M3 | `auth_token_prefix_rejected` | 401 | `401` | PASS |
+| M4 | `auth_scheme_case_insensitive` | 200 (RFC 7235 scheme is case-insensitive) | `200` | PASS |
+| M5 | `unknown_path_with_token` | 404 not_found | `404 not_found` | PASS |
+| M6 | `head_not_allowed` | 405 | `code=405` | PASS |
+| M7 | `left_running_for_phase2` | active | `active` | PASS |
+
+
+Controller suite (`verify/controller-remote-verify.sh`, extended with TCP/UDP,
+per-node interface dispatch, controller protocol allowlist and the controller
+port/interface rejection matrix) — **155 PASS / 0 FAIL / 0 SKIP**:
+
+#### A. deployment posture
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| A1 | `unit_enabled` | enabled | `enabled` | PASS |
+| A2 | `unit_active` | active | `active` | PASS |
+| A3 | `runs_as_unprivileged` | tracecat | `tracecat` | PASS |
+| A4 | `no_new_privileges` | yes | `yes` | PASS |
+| A5 | `protect_system` | strict | `strict` | PASS |
+| A6 | `memory_deny_write_execute` | yes (Controller never execs nexttrace) | `yes` | PASS |
+| A7 | `loopback_only_listener` | 127.0.0.1:8080 | `127.0.0.1:8080` | PASS |
+| A8 | `no_wildcard_listener` | no 0.0.0.0/:: on 8080 | `127.0.0.1:8080` | PASS |
+| A9 | `not_publicly_reachable` | no HTTP 200 | `code=000` | PASS |
+| A10 | `config_permissions` | 640 root:tracecat | `640 root:tracecat` | PASS |
+| A11 | `env_file_permissions` | 600 root:root | `600 root:root` | PASS |
+| A12 | `database_permissions` | 0600 owner tracecat | `600 tracecat:tracecat` | PASS |
+| A13 | `process_user` | tracecat | `tracecat` | PASS |
+
+#### A2. target allowlist configuration (security.allowed_cidrs)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| A2.1 | `allowlist_rejects_default_route` | startup fails: 0.0.0.0/0 rejected | `rc=1 configuration error: config: security.allowed_cidrs: invalid target policy: "0.0.0.0/0" is` | PASS |
+| A2.2 | `allowlist_rejects_invalid_cidr` | startup fails on malformed CIDR | `rc=1 configuration error: config: security.allowed_cidrs: invalid target policy: "not-a-cidr":` | PASS |
+| A2.3 | `allowlist_instance_started` | temporary controller with 10.0.0.0/8 allowlist | `up=1` | PASS |
+| A2.4 | `allowlist_allows_configured_cidr` | 10.0.0.1 resolves (200 kind=ip) | `code=200 kind=ip` | PASS |
+| A2.5 | `default_policy_still_denies` | main instance 422 target_rejected | `422 target_rejected` | PASS |
+
+#### B. health and session (dev auth mode)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| B1 | `healthz_ok` | 200 {status:ok} | `200 ok` | PASS |
+| B2 | `healthz_minimal` | only status+schema_version | `schema_version,status` | PASS |
+| B3 | `dev_session_authenticated` | 200 authenticated=true | `200 True mode=dev` | PASS |
+| B4 | `session_csrf_token` | >=32 chars | `len=43` | PASS |
+| B5 | `session_limits_match_config` | max_hops=30 max_queries=3 | `30/3/60000` | PASS |
+| B6 | `session_limits_protocols` | protocols=[icmp tcp udp] | `icmp,tcp,udp` | PASS |
+| B7 | `dev_mode_warning` | warning about dev bypass in session | `dev authentication bypass is enabled; never expose this Controller to untrusted networks` | PASS |
+| B8 | `dev_rejects_xff` | 403 | `403 forbidden` | PASS |
+| B9 | `dev_rejects_x_real_ip` | 403 | `403 forbidden` | PASS |
+| B10 | `dev_rejects_xfh` | 403 | `403 forbidden` | PASS |
+| B11 | `login_absent_in_dev` | 404 | `404 not_found` | PASS |
+| B12 | `logout_absent_in_dev` | 404 | `404 not_found` | PASS |
+| B13 | `identity_headers_ignored` | 200 dev (forged JWT ignored in dev mode) | `200 mode=dev` | PASS |
+| B14 | `identity_email_header_not_trusted` | user stays dev@localhost | `200 user=dev@localhost` | PASS |
+
+#### C. node registry
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| C1 | `nodes_ok` | 200 | `200` | PASS |
+| C2 | `nodes_count` | 2 | `2` | PASS |
+| C3 | `agents_health_ok` | both agents ok with v1.7.3 | `debian-test-1=ok/v1.7.3,debian-test-2=ok/v1.7.3` | PASS |
+| C4 | `nodes_no_url_or_secret_leak` | no agent URLs/tokens/paths | `none` | PASS |
+| C5 | `nodes_expose_interfaces` | each node advertises sorted eligible interfaces incl. eth0 | `nodes=debian-test-1:eth0,tailscale0,debian-test-2:eth0,tailscale0` | PASS |
+
+#### D. central DNS resolution
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| D1 | `resolve_literal` | 200 kind=ip | `200 kind=ip n=1` | PASS |
+| D2 | `literal_preselectable` | requires_selection=false | `False` | PASS |
+| D3 | `resolve_domain` | 200 kind=domain | `200 kind=domain` | PASS |
+| D4 | `domain_addresses_valid` | valid canonical A/AAAA entries | `4 addresses families=ipv4,ipv6 selection=True trunc=False warnings=1` | PASS |
+| D5 | `domain_cdn_warning` | GeoDNS warning present | `Agents trace the centrally resolved IP. For CDN and GeoDNS services, paths may differ from resolving the hostname locally on each Agent.` | PASS |
+| D6 | `resolution_selection_semantics` | requires_selection == (count>1) | `n=4 selection=True` | PASS |
+| D7 | `resolve_multi_address_domain` | 200 with multiple choices | `200 1 addresses families=ipv4 selection=False` | PASS |
+| D8 | `resolve_reject[not a domain"}]` | 400/422 | `400 invalid_request` | PASS |
+| D9 | `resolve_reject[example.com;id"}]` | 400/422 | `400 invalid_request` | PASS |
+| D10 | `resolve_reject[10.0.0.1"}]` | 400/422 | `422 target_rejected` | PASS |
+| D11 | `resolve_reject[203.0.113.10"}]` | 400/422 | `422 target_rejected` | PASS |
+| D12 | `resolve_reject[http://example.com/"}]` | 400/422 | `400 invalid_request` | PASS |
+| D13 | `resolve_body_over_1kib` | 413 | `413 payload_too_large size=2015` | PASS |
+
+#### E. multi-node job, SSE, history, export
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| E1 | `resolve_ip_for_job` | 1.1.1.1 | `1.1.1.1` | PASS |
+| E2 | `job_create_multi_node` | 202 | `202` | PASS |
+| E3 | `job_id_shape` | 32 hex | `1567f7611f45b30a750dc5ded4ab3690` | PASS |
+| E4 | `job_initial_status` | pending/running | `pending` | PASS |
+| E5 | `sse_connect` | 200 | `200` | PASS |
+| E6 | `sse_content_type` | text/event-stream | `text/event-stream` | PASS |
+| E7 | `sse_event_job` | event: job snapshot(s) | `events=4` | PASS |
+| E8 | `sse_snapshots_bare_json` | job snapshots, terminal close | `4 snapshots, terminal=completed, nodes=2` | PASS |
+| E9 | `sse_closed_on_terminal` | server closed stream (curl exit 0, not timeout) | `curl_exit=0 code=200` | PASS |
+| E10 | `job_completed` | completed | `completed` | PASS |
+| E11 | `icmp_job_has_no_port_or_interface` | no port/interface keys on icmp | `icmp job: no port/interface keys, both nodes auto` | PASS |
+| E12 | `both_nodes_completed_with_hops` | both completed, hops parsed | `debian-test-1=completed/hops=14 debian-test-2=completed/hops=14` | PASS |
+| E13 | `job_node_summaries` | per-node summaries present | `debian-test-1: {'hop_count': 14, 'reached_destination': True, 'destination_rtt_ms': 250.242, 'replies': 5, 'probes': 14} \| debian-test-2: {'hop_count': 14, 'reached_destination': True, 'destination_rtt_ms': 237.56, 'replies': 6, 'probes': 14}` | PASS |
+| E14 | `destination_ptr_reverse_dns` | 1.1.1.1 hop shows one.one.one.one | `reverse_dns=True records=['debian-test-1/1.1.1.1=one.one.one.one']` | PASS |
+| E15 | `export_ok` | 200 | `200` | PASS |
+| E16 | `export_content_disposition` | attachment filename | `attachment; filename="tracecat-1567f7611f45b30a750dc5ded4ab3690.json"` | PASS |
+| E17 | `export_structure_bounded_raw` | 2 raw results, pure JSON, no banner | `raw_results=['debian-test-1', 'debian-test-2'] sizes={'debian-test-1': 3888, 'debian-test-2': 4290}` | PASS |
+| E18 | `export_no_banner_text` | no NextTrace advisory | `none` | PASS |
+| E19 | `history_list` | 200 | `200` | PASS |
+| E20 | `history_persists_across_restart` | job retrievable after restart | `200 id=1567f7611f45b30a750dc5ded4ab3690` | PASS |
+| E21 | `controller_restart_healthy` | active | `active` | PASS |
+
+#### E2. TCP/UDP and per-node interface dispatch
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| E2.1 | `job_create_tcp` | 202 | `202 tcp/443` | PASS |
+| E2.2 | `tcp_job_completed` | completed | `completed` | PASS |
+| E2.3 | `tcp_dispatched_to_both_nodes` | >=2 concurrent nexttrace children | `max_children=2` | PASS |
+| E2.4 | `tcp_job_echo_and_contract` | protocol=tcp port=443, both completed | `tcp job: protocol=tcp port=443, both completed, no per-node port/interface` | PASS |
+| E2.5 | `tcp_child_argv_exact` | -4 -T ... -p 443 target | `SUMMARY 20/20 argv checks passed: /usr/local/bin/nexttrace -4 -T --json -q 1 -m 8 --timeout 1000 -p 443 1.1.1.1` | PASS |
+| E2.6 | `job_create_udp` | 202 | `202 udp/33494` | PASS |
+| E2.7 | `udp_job_completed` | completed | `completed` | PASS |
+| E2.8 | `udp_child_argv_exact` | -4 -U ... -p 33494 target | `SUMMARY 20/20 argv checks passed: /usr/local/bin/nexttrace -4 -U --json -q 1 -m 8 --timeout 1000 -p 33494 1.1.1.1` | PASS |
+| E2.9 | `job_create_interface` | 202 | `202` | PASS |
+| E2.10 | `interface_job_echo` | per-node interface echoed, mismatch isolated | `node A interface=eth0, node B automatic, both completed` | PASS |
+| E2.11 | `interface_child_argv_mixed` | one child -D eth0, one child auto (no -D) | `iface_line=1 auto_line=1 lines=2` | PASS |
+| E2.12 | `controller_protocol_allowlist_instance` | temporary controller with allowed_protocols=[icmp] | `up=1` | PASS |
+| E2.13 | `controller_protocol_allowlist_session` | session limits.protocols=[icmp] | `icmp` | PASS |
+| E2.14 | `controller_protocol_allowlist_rejects_tcp` | 400 before dispatch, no child | `400 invalid_request children=0` | PASS |
+| E2.15 | `controller_protocol_allowlist_allows_icmp` | 202 | `202` | PASS |
+| E2.16 | `job_reject[tcp_missing_port]` | 400 before dispatch, no child | `400 invalid_request children=0` | PASS |
+| E2.17 | `job_reject[tcp_port_zero]` | 400 before dispatch, no child | `400 invalid_request children=0` | PASS |
+| E2.18 | `job_reject[tcp_port_too_high]` | 400 before dispatch, no child | `400 invalid_request children=0` | PASS |
+| E2.19 | `job_reject[tcp_port_string]` | 400 before dispatch, no child | `400 invalid_request children=0` | PASS |
+| E2.20 | `job_reject[udp_missing_port]` | 400 before dispatch, no child | `400 invalid_request children=0` | PASS |
+| E2.21 | `job_reject[icmp_with_port]` | 400 before dispatch, no child | `400 invalid_request children=0` | PASS |
+| E2.22 | `job_reject[invalid_protocol]` | 400 before dispatch, no child | `400 invalid_request children=0` | PASS |
+| E2.23 | `job_reject[interface_loopback]` | 400 before dispatch, no child | `400 invalid_request children=0` | PASS |
+| E2.24 | `job_reject[interface_not_advertised]` | 400 before dispatch, no child | `400 invalid_request children=0` | PASS |
+| E2.25 | `job_reject[interface_invalid_name]` | 400 before dispatch, no child | `400 invalid_request children=0` | PASS |
+| E2.26 | `job_reject[interface_unselected_node]` | 400 before dispatch, no child | `400 invalid_request children=0` | PASS |
+| E2.27 | `job_reject[interface_unknown_node]` | 400 before dispatch, no child | `400 invalid_request children=0` | PASS |
+
+#### F. cancellation across both Agents
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| F1 | `cancel_job_created` | 202 | `202 id=ba1605c5ca49d0b4c700ee368ae9bcd2` | PASS |
+| F2 | `agents_running_traces` | >=1 nexttrace child | `children=2` | PASS |
+| F3 | `cancel_request_accepted` | 200 with job id (cancellation is asynchronous) | `200 id=ba1605c5ca49d0b4c700ee368ae9bcd2 status=running` | PASS |
+| F4 | `cancel_reaps_agent_children` | no nexttrace child within 15s | `reaped` | PASS |
+| F5 | `cancel_terminal_state` | cancelled | `cancelled nodes=debian-test-1:cancelled,debian-test-2:cancelled` | PASS |
+| F6 | `cancelled_nodes` | node statuses cancelled | `debian-test-1:cancelled,debian-test-2:cancelled` | PASS |
+| F7 | `cancel_terminal_job_conflict` | 409 conflict | `409 conflict` | PASS |
+| F8 | `cancel_unknown_job` | 404 | `404 not_found` | PASS |
+
+#### F2. restart reconciliation (no stale running jobs)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| F2.1 | `recon_job_created` | 202 | `202` | PASS |
+| F2.2 | `recon_job_running` | >=1 nexttrace child | `children=2` | PASS |
+| F2.3 | `controller_auto_restarted_after_crash` | systemd Restart=on-failure restarted it | `old=3643620 new=3643793` | PASS |
+| F2.4 | `interrupted_job_marked_failed` | failed job + failed nodes with internal error | `job=failed nodes=debian-test-1:failed/internal,debian-test-2:failed/internal` | PASS |
+| F2.5 | `reconciliation_logged` | journal warns about reconciled jobs | `marked jobs interrupted by a previous Controller process as failed` | PASS |
+| F2.6 | `history_has_no_stale_running_jobs` | history clean after restart | `stale_running=[]` | PASS |
+| F2.7 | `job_creation_after_reconciliation` | 202 | `202` | PASS |
+
+#### G. limits, validation and API surface
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| G1 | `jobs_reject[hops31]` | 400 | `400 invalid_request` | PASS |
+| G2 | `jobs_reject[queries4]` | 400 | `400 invalid_request` | PASS |
+| G3 | `jobs_reject[timeout_low]` | 400 | `400 invalid_request` | PASS |
+| G4 | `jobs_reject[timeout_high]` | 400 | `400 invalid_request` | PASS |
+| G5 | `jobs_reject[empty_nodes]` | 400 | `400 invalid_request` | PASS |
+| G6 | `jobs_reject[unknown_node]` | 403 | `403 forbidden` | PASS |
+| G7 | `jobs_reject[private_target]` | 422 | `422 target_rejected` | PASS |
+| G8 | `jobs_reject[bad_protocol]` | 400 | `400 invalid_request` | PASS |
+| G9 | `jobs_unknown_field` | 400 | `400 invalid_request` | PASS |
+| G10 | `jobs_malformed_json` | 400 | `400 invalid_request` | PASS |
+| G11 | `jobs_body_over_8kib` | 413 | `413 payload_too_large size=9150` | PASS |
+| G12 | `unknown_job_get` | 404 not_found | `404 not_found` | PASS |
+| G13 | `api_unknown_path_json` | 404 JSON | `404 not_found ct=application/json; charset=utf-8` | PASS |
+| G14 | `api_root_json_not_spa` | 404 JSON | `404 not_found` | PASS |
+| G15 | `method_not_allowed_json` | 405 Allow: GET | `405 Allow=GET` | PASS |
+| G16 | `healthz_post_method` | 405 | `405 Allow=GET` | PASS |
+| G17 | `history_limit_validation` | clamped or 400 | `200` | PASS |
+
+#### H. embedded dashboard and security headers
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| H1 | `dashboard_root` | 200 | `200` | PASS |
+| H2 | `dashboard_content_type` | text/html | `text/html; charset=utf-8` | PASS |
+| H3 | `csp_present` | default-src 'self' + frame-ancestors 'none' | `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame` | PASS |
+| H4 | `security_header[X-Content-Type-Options]` | present | `nosniff` | PASS |
+| H5 | `security_header[X-Frame-Options]` | present | `DENY` | PASS |
+| H6 | `security_header[Referrer-Policy]` | present | `no-referrer` | PASS |
+| H7 | `security_header[Permissions-Policy]` | present | `accelerometer=(), camera=(), geolocation=(), microphone=(), payment=(), usb=()` | PASS |
+| H8 | `security_header[Cross-Origin-Opener-Policy]` | present | `same-origin` | PASS |
+| H9 | `nosniff` | nosniff | `nosniff` | PASS |
+| H10 | `frame_deny` | DENY | `DENY` | PASS |
+| H11 | `html_never_reused_without_validation` | no-store or no-cache | `no-cache` | PASS |
+| H12 | `html_references_committed_assets` | hashed JS asset | `/assets/index-Bpfp71s6.js` | PASS |
+| H13 | `js_asset_served` | 200 text/javascript | `200 text/javascript; charset=utf-8` | PASS |
+| H14 | `js_asset_immutable_cache` | immutable | `public, max-age=31536000, immutable` | PASS |
+| H15 | `css_asset_served` | 200 text/css | `200 text/css; charset=utf-8` | PASS |
+| H16 | `no_directory_listing` | 404 or SPA fallback, never a listing | `200 SPA fallback (no listing), ct=text/html; charset=utf-8` | PASS |
+| H17 | `path_traversal[/assets/../../../../etc/passwd]` | no file disclosure | `307 text/html; charset=utf-8` | PASS |
+| H18 | `path_traversal[/assets/%2e%2e%2f%2e%2e%2fetc%2fpasswd]` | no file disclosure | `200 text/html; charset=utf-8` | PASS |
+| H19 | `path_traversal[/..%2f..%2fetc%2fpasswd]` | no file disclosure | `200 text/html; charset=utf-8` | PASS |
+| H20 | `missing_asset_404` | 404 | `404` | PASS |
+| H21 | `spa_fallback_extensionless` | 200 HTML | `200 text/html; charset=utf-8` | PASS |
+| H22 | `favicon_served` | 200 | `200` | PASS |
+| H23 | `bundle_no_secret_or_node_ip` | no tokens/node IPs/paths | `none` | PASS |
+
+#### I. cleanup and journal hygiene
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| I1 | `journal_no_secret_or_path_leak` | no tokens/hashes/paths | `none` | PASS |
+| I2 | `journal_clean_no_warn_error` | no WARN/ERROR | `` | PASS |
+
+
+Installer / release suite (`verify/installer-remote-verify.sh`) — **61 PASS / 0 FAIL / 1 SKIP**:
+
+#### L0. release artifacts (local build, pre-tag)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| L0.1 | `artifact_present[tracecat-agent-linux-amd64.tar.gz]` | non-trivial tarball | `3173357 bytes` | PASS |
+| L0.2 | `artifact_checksum[tracecat-agent-linux-amd64.tar.gz]` | checksums.txt matches tarball | `match=yes` | PASS |
+| L0.3 | `artifact_contents[agent]` | bin, install.sh, systemd unit | `missing=none` | PASS |
+| L0.4 | `artifact_version[agent]` | VERSION=0.1.1 | `0.1.1` | PASS |
+| L0.5 | `artifact_present[tracecat-controller-linux-amd64.tar.gz]` | non-trivial tarball | `5255476 bytes` | PASS |
+| L0.6 | `artifact_checksum[tracecat-controller-linux-amd64.tar.gz]` | checksums.txt matches tarball | `match=yes` | PASS |
+| L0.7 | `artifact_contents[controller]` | bin, install.sh, systemd unit | `missing=none` | PASS |
+| L0.8 | `artifact_version[controller]` | VERSION=0.1.1 | `0.1.1` | PASS |
+| L0.9 | `release_asset_download` | informational | `release-asset download path (GitHub Releases) not exercised: v0.1.1 is not tagged yet; the installer was driven with --tarball/--checksums (offline path), which is the same code path used after download.` | SKIP (informational) |
+
+#### L0b. shipped installer argument validation (regression)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| L0b.1 | `installer_test_script_staged` | deploy/install_test.sh staged | `present` | PASS |
+| L0b.2 | `installer_validation_regression_suite` | shipped install_test.sh passes | `rc=0 installer validation: PASS` | PASS |
+| L0b.3 | `installer_validation_no_failures` | no FAIL lines | `fail_lines=0` | PASS |
+| L0b.4 | `installer_url_class_portable` | plain+bracketed-IPv6 URLs match, whitespace rejected | `plain=MATCH ipv6=MATCH space=NOMATCH` | PASS |
+| L0b.5 | `installer_listen_class_portable` | IPv4 + bracketed IPv6 accepted, bad port rejected | `plain=MATCH ipv6=MATCH bad=NOMATCH` | PASS |
+| L0b.6 | `installer_accepts_valid_agent_url` | plain http private URL accepted (fixed) | `ACCEPTED` | PASS |
+
+#### L0c. shipped installer public-origin validation (regression)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| L0c.1 | `installer_public_origin_class_portable` | http/https/bracketed-IPv6 accepted, ftp/space rejected | `http=MATCH https=MATCH ipv6=MATCH ftp=NOMATCH space=NOMATCH` | PASS |
+| L0c.2 | `installer_public_origin_regression_suite` | shipped install_test.sh covers public origins | `install_test.sh rc=0` | PASS |
+
+#### L1. fresh Agent install (offline --tarball)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| L1.1 | `stack_stopped_for_installer` | verification units stopped | `stopped` | PASS |
+| L1.2 | `agent_install_exit` | installer exit 0 | `0` | PASS |
+| L1.3 | `agent_install_checksum_verified` | checksum verified | `checksum verified` | PASS |
+| L1.4 | `agent_install_force_regenerated` | config regenerated with --force | `force` | PASS |
+| L1.5 | `agent_env_permissions` | 600 root:root | `600 root:root` | PASS |
+| L1.6 | `agent_config_permissions` | 640 root:tracecat | `640 root:tracecat` | PASS |
+| L1.7 | `agent_token_generated` | >=32 chars | `len=64` | PASS |
+| L1.8 | `agent_config_strict_json` | valid JSON | `valid` | PASS |
+| L1.9 | `agent_generated_config_valid` | strict schema, defaults, exact listen | `node_id= vm-0-12-debian` | PASS |
+| L1.10 | `agent_unit_installed` | ExecStart points at generated config | `ExecStart=/usr/local/bin/tracecat-agent -config /etc/tracecat/agent.json` | PASS |
+| L1.11 | `agent_no_start_honored` | inactive with --no-start | `inactive` | PASS |
+| L1.12 | `agent_started_via_systemd` | active and serving health | `active=active health_up=1` | PASS |
+| L1.13 | `agent_bind_exact` | 100.81.98.125:8444 | `100.81.98.125:8444` | PASS |
+| L1.14 | `installed_agent_health` | 200 | `200` | PASS |
+| L1.15 | `installed_agent_health_contract` | ok + protocols + interfaces | `ok protocols= ['icmp', 'tcp', 'udp'] interfaces= ['eth0', 'tailscale0']` | PASS |
+| L1.16 | `installed_agent_requires_token` | 401 | `401` | PASS |
+
+#### L2. Controller install (dev mode, generated token env)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| L2.1 | `controller_install_exit` | installer exit 0 | `0` | PASS |
+| L2.2 | `installer_public_origin_accepted_live` | installer proceeded past origin validation and started | `listening on 127.0.0.1:8080 (public origin http://127.0.0.1:18090)` | PASS |
+| L2.3 | `controller_env_permissions` | 600 root:tracecat | `600 root:tracecat` | PASS |
+| L2.4 | `controller_env_written_token` | token env written from environment | `len=86 bytes` | PASS |
+| L2.5 | `installer_log_no_token` | token not printed by controller installer | `none` | PASS |
+| L2.6 | `controller_config_strict_json` | valid JSON | `valid` | PASS |
+| L2.7 | `controller_generated_config_valid` | dev mode, agent, protocols, strict schema | `ok dev config, 1 agent, allowed_protocols default` | PASS |
+| L2.8 | `controller_service_started` | healthz 200 | `up=1` | PASS |
+| L2.9 | `installed_controller_sees_agent` | node health ok | `[('vm-0-12-debian', 'ok')]` | PASS |
+
+#### L3. installer refuses corrupt artifacts
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| L3.1 | `installer_rejects_checksum_mismatch` | nonzero exit + checksum mismatch | `rc=1 checksum mismatch for /tmp/tc-installer.dSg7lL/corrupt.tar.gz` | PASS |
+| L3.2 | `mismatch_did_not_replace_binary` | binary unchanged | `a067e2810c0100c831990f438551bcded59530f2240706182a57787d400421ff` | PASS |
+| L3.3 | `installer_rejects_wrong_contents` | refuses a tarball without the binary | `rc=1 tarball does not contain bin/tracecat-agent` | PASS |
+
+#### L4. upgrade keeps existing configuration
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| L4.1 | `upgrade_warns_keeps_config` | warns and keeps existing config | `keeping existing /etc/tracecat/controller.json (use --force to regenerate)` | PASS |
+| L4.2 | `upgrade_config_unchanged` | config mtime+content unchanged | `mtime=1793202361` | PASS |
+| L4.3 | `upgrade_env_unchanged` | env mtime+content unchanged | `mtime=1793202361` | PASS |
+| L4.4 | `upgrade_replaces_binary` | binary mtime advanced | `before=1793202361 after=1793202364` | PASS |
+
+#### L5. local-auth mode install + login/CSRF
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| L5.1 | `local_install_exit` | installer exit 0 | `0` | PASS |
+| L5.2 | `local_env_has_pbkdf2_hash` | pbkdf2 hash in 0600 env | `pbkdf2-sha256$210000` | PASS |
+| L5.3 | `local_env_no_plaintext_password` | plaintext password absent | `none` | PASS |
+| L5.4 | `local_config_strict_schema` | local mode config valid | `ok local config` | PASS |
+| L5.5 | `local_controller_started` | healthz 200 | `up=1` | PASS |
+| L5.6 | `local_login_with_installed_hash` | 200 | `200` | PASS |
+| L5.7 | `local_csrf_post_after_install` | resolver 200 with CSRF | `200` | PASS |
+| L5.8 | `local_login_wrong_password` | 401 | `401` | PASS |
+
+#### L6. missing Agent token env (controller installer fails closed)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| L6.1 | `missing_token_installer_exit` | exit 0 (installed but not started) | `rc=0` | PASS |
+| L6.2 | `missing_token_warns` | warning about missing token env | `Agent token environment variable(s) were not set while installing.` | PASS |
+| L6.3 | `missing_token_leaves_placeholder` | commented placeholder in env | `1 placeholder(s)` | PASS |
+| L6.4 | `missing_token_no_start` | controller not started | `inactive` | PASS |
+| L6.5 | `missing_token_no_listener` | no 8080 listener | `` | PASS |
+
+
+Browser proof (`verify/e2e/drive-v011.mjs`, headless Chrome over
+`ssh -N -L 18090:127.0.0.1:8080`) — **18/18 checks PASS**:
+
+| # | Check | Detail | Result |
+|---|---|---|---|
+| B1 | `two_agents_listed` | both tailnet agents visible | PASS |
+| B2 | `per_node_interface_selectors` | selectors=[{"label":"Source network interface for Debian test host A","options":["","eth0","tailscale0"]},{"label":"Source network interface for Debian test host B","options":["","eth0","tailscale0"]}] | PASS |
+| B3 | `interface_options_include_eth0` | [["","eth0","tailscale0"],["","eth0","tailscale0"]] | PASS |
+| B4 | `interface_override_chip` | selected agent shows iface eth0 | PASS |
+| B5 | `protocol_selector_three_options` | ["ICMP","TCP","UDP"] | PASS |
+| B6 | `port_input_accepts_443` | port=443 | PASS |
+| B7 | `tcp_hop_table` | rows=60 | PASS |
+| B8 | `tcp_probe_label` | tcp/443 chip visible | PASS |
+| B9 | `tcp_iface_result` | iface eth0 result chip | PASS |
+| B10 | `tcp_both_nodes` | both node cards | PASS |
+| B11 | `tcp_completed` | completed status present | PASS |
+| B12 | `udp_default_port_33494` | port=33494 | PASS |
+| B13 | `udp_probe_label` | udp/33494 chip visible | PASS |
+| B14 | `udp_hop_table` | udp result rendered | PASS |
+| B15 | `mobile_no_horizontal_overflow` | {"scrollWidth":390,"innerWidth":390} | PASS |
+| B16 | `zero_csp_violations` | 0 | PASS |
+| B17 | `zero_console_errors` | 0 | PASS |
+| B18 | `zero_page_exceptions` | 0 | PASS |
+
+Console errors: **0**, CSP violations: **0**,
+uncaught exceptions: **0**.
+
+### 13.5 Screenshots (`verify/screenshots-v011/`)
+
+TCP/443 job with per-node interface selection (`Debian test host A` → `eth0`,
+`Debian test host B` → automatic), protocol/port chips and 30-TTL results for
+both Agents:
+
+![TCP/443 multi-node results with interface override](../verify/screenshots-v011/tcp-results.png)
+
+Protocol selector + destination port + per-node interface dropdowns before
+starting the TCP run:
+
+![Protocol/port and interface selectors](../verify/screenshots-v011/selection.png)
+
+UDP/33494 run and the 390 px mobile layout:
+
+![UDP/33494 results](../verify/screenshots-v011/udp-results.png)
+
+![Mobile viewport](../verify/screenshots-v011/mobile.png)
+
+Machine-readable report: `verify/screenshots-v011/browser-report.json`.
+
+### 13.6 Residual risks and notes for v0.1.1
+
+- **Release-asset download path not yet exercised**: v0.1.1 is untagged, so the
+  installer was driven with local `--tarball/--checksums`; the Lead will run a
+  post-tag download smoke. Everything after download (checksum verify, extract,
+  config generation, systemd install) is covered here.
+- Cloudflare Access mode remains code-reviewed only (no CF account/tunnel in the
+  verification environment); dev/local were deployed.
+- The browser proof still uses the loopback tunnel origin (`18090`); the
+  `Secure`-cookie path on a real HTTPS origin is unit-tested, not observed.
+- Tailnet ACLs are still not applied in this test environment; the bearer token
+  remains the only application-layer authentication between Controller and
+  Agents here.
+- Providers may filter TCP/UDP responses; a `no_reply` hop is reported honestly
+  and is not a failure (the TCP/UDP destination still completed in these runs).
+- TCP/UDP use `CAP_NET_RAW` (ambient) exactly like ICMP; interface pinning maps
+  to a fixed `-D <name>` pair and is revalidated against the Agent's live list.
+- The 3 SKIPs remain informational/N/A (provider ICMP-filter capability probe,
+  documented bind-matrix environment note, and the deferred release-asset
+  download check).
+
+### 13.7 Reproducing this delta
+
+```bash
+# build local release artifacts (no Node needed; dashboard assets committed)
+scripts/build-release.sh 0.1.1 amd64
+
+# full stack (new schema) on the Debian host
+TESTHOST=root@124.222.154.86 verify/setup-testhost-fullstack.sh
+TESTHOST=root@124.222.154.86 verify/setup-testhost-agent.sh
+
+# host-side suites
+scp verify/agent-remote-verify.sh verify/controller-remote-verify.sh \
+    verify/installer-remote-verify.sh verify/check_trace_response.py \
+    verify/check_argv.py root@HOST:/root/tc-verify/
+ssh root@HOST 'bash /root/tc-verify/agent-remote-verify.sh'
+ssh root@HOST 'bash /root/tc-verify/controller-remote-verify.sh'
+ssh root@HOST 'bash /root/tc-verify/installer-remote-verify.sh'   # stops/restores installer services
+
+# browser proof (from the Mac, after restoring the stack)
+ssh -N -L 18090:127.0.0.1:8080 root@HOST &
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new \
+  --remote-debugging-port=9334 --user-data-dir=/tmp/tc-verify-chrome-v011 \
+  --no-first-run --no-default-browser-check --disable-gpu --no-proxy-server about:blank &
+CDP_PORT=9334 APP_URL=http://127.0.0.1:18090/ OUT_DIR=verify/screenshots-v011 \
+  node verify/e2e/drive-v011.mjs
+```
+
+Expected: agent `SUMMARY: 174 PASS, 0 FAIL, 2 SKIP`,
+controller `SUMMARY: 155 PASS, 0 FAIL, 0 SKIP`,
+installer `SUMMARY: 61 PASS, 0 FAIL, 1 SKIP`,
+browser `SUMMARY 18/18 browser checks passed`.
+The normal two-Agent + Controller stack is left running at the end.

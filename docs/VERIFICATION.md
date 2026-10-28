@@ -1225,7 +1225,7 @@ Delta verification for the v0.1.1 feature batch on top of the v0.1.0 report
 | Delta commits reviewed | `2a1aef1`…`bc98212` (contracts, TCP/UDP, interfaces, controller dispatch, dashboard, install.sh, CI release, release packaging) and `a3e02a1`, `8385e46`, `ff254fd`, `2d27ee3` (installer fixes) |
 | Binaries rebuilt at final SHA | agent `sha256 5c09b8034d003f0c…`, controller `sha256 e0b7f73d3f9cb286…` (built by `scripts/build-release.sh 0.1.1 amd64` and by `verify/setup-testhost-*.sh`); Go code identical to `bc98212` where the agent/controller suites below were run |
 | Host | Debian 13, systemd 257, Tailscale 1.104.4, NextTrace v1.7.3 on `100.81.98.125` |
-| Release artifacts | local `dist/tracecat-{agent,controller}-linux-amd64.tar.gz` + `checksums.txt` (VERSION=0.1.1, layout `bin/`, `install.sh`, `deploy/systemd/`); **GitHub-release download path not exercised — v0.1.1 is not tagged yet** (Lead will do a post-tag asset smoke; the offline `--tarball/--checksums` path is the same code) |
+| Release artifacts | local `dist/tracecat-{agent,controller}-linux-amd64.tar.gz` + `checksums.txt` (VERSION=0.1.1, layout `bin/`, `install.sh`, `deploy/systemd/`); offline `--tarball/--checksums` installer path fully tested here — see §13.10 for the post-tag release-asset smoke |
 | Totals for this delta | **408 PASS / 0 FAIL / 3 SKIP** (Agent 174, Controller 155, installer 61, browser 18) |
 
 ### 13.2 New behaviour verified
@@ -1901,10 +1901,13 @@ Machine-readable report: `verify/screenshots-v011/browser-report.json`.
 
 ### 13.6 Residual risks and notes for v0.1.1
 
-- **Release-asset download path not yet exercised**: v0.1.1 is untagged, so the
-  installer was driven with local `--tarball/--checksums`; the Lead will run a
-  post-tag download smoke. Everything after download (checksum verify, extract,
-  config generation, systemd install) is covered here.
+- **Release-asset download path**: exercised post-tag by the Lead (§13.10);
+  checksums, artifact layout, bundled installer hash and the published binary
+  were verified. A full standalone `install.sh` run directly from the GitHub
+  release URL could not be completed inside the verification environment
+  because cross-border asset downloads were extremely slow; the identical
+  installer code path was fully exercised offline (61 checks). Operators on
+  normal networks should expect the documented one-command behaviour.
 - Cloudflare Access mode remains code-reviewed only (no CF account/tunnel in the
   verification environment); dev/local were deployed.
 - The browser proof still uses the loopback tunnel origin (`18090`); the
@@ -1952,3 +1955,23 @@ controller `SUMMARY: 155 PASS, 0 FAIL, 0 SKIP`,
 installer `SUMMARY: 61 PASS, 0 FAIL, 1 SKIP`,
 browser `SUMMARY 18/18 browser checks passed`.
 The normal two-Agent + Controller stack is left running at the end.
+
+### 13.10 Post-tag release-asset smoke (Lead, v0.1.1)
+
+Verified after publishing https://github.com/dotfrankruan/TraceCat/releases/tag/v0.1.1 (tag commit `4ad5cdc`, including the release-workflow fix):
+
+| Check | Result |
+| --- | --- |
+| Release assets present | PASS — `checksums.txt`, controller/agent `linux-amd64` + `linux-arm64` tarballs (5 assets) |
+| SHA-256 of downloaded amd64 tarballs vs `checksums.txt` | PASS — both `OK` |
+| Tarball `VERSION` | PASS — `v0.1.1` |
+| Bundled `install.sh` hash equals repo `deploy/install.sh` | PASS — `e02a1b20d6d4…a7d040` on both |
+| Published linux/amd64 agent binary runs on the Debian 13 test host | PASS — `tracecat-agent v0.1.1 (commit 4ad5cdc3a6fd, built 2026-10-28T15:59:36Z)` |
+| Release workflow | PASS — the `Release` workflow completed and attached all assets (an initial run failed because a cleanup glob removed the tarballs before checksums; fixed in `4ad5cdc`) |
+
+Caveat: the standalone installer *download* path was additionally exercised
+manually at the asset level (download, checksum, extraction, binary execution);
+the full `install.sh agent --version 0.1.1 ...` run over the release URL was not
+completed in this environment because cross-border downloads from GitHub were
+extremely slow. The installer itself (same file hash) passed all 61 offline
+installer checks in §13.5.

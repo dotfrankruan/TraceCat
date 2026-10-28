@@ -110,7 +110,7 @@ verification report.
   for flag detection and JSON parsing; the parser tolerates known schema
   variations.
 - Deployed and independently verified on Debian 13 with systemd 257 and
-  Tailscale 1.104: 325 PASS / 0 FAIL / 2 environment-N/A SKIPs, including real
+  Tailscale 1.104: 329 PASS / 0 FAIL / 2 environment-N/A SKIPs, including real
   ICMP traces from two tailnet Agents, local-auth/CSRF checks and a
   zero-violation-CSP browser run (`docs/VERIFICATION.md`).
 - Tests do not require public traceroute targets, real GeoIP services, or

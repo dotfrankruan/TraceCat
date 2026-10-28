@@ -40,7 +40,7 @@ external NextTrace CLI, with an embedded React dashboard.
   deployment and security documentation, CI and Dependabot.
 - **Verification**: hermetic fake-NextTrace test harness, adversarial security
   suite, and an independent real-host deployment verification report
-  (`docs/VERIFICATION.md`): 325 PASS / 0 FAIL / 2 environment-N/A SKIPs across
+  (`docs/VERIFICATION.md`): 329 PASS / 0 FAIL / 2 environment-N/A SKIPs across
   Agent, Controller, local-auth and headless-browser suites.
 
 ### Fixed during hardening

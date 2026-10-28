@@ -50,10 +50,12 @@ export TRACECAT_AGENT_TOKEN=local-dev-token-please-change
 # expected: "nexttrace detected" ... "agent listening" listen=127.0.0.1:9481
 ```
 
-The dev config binds loopback and explicitly relaxes the Tailscale-only bind
-rule. A production Agent binds only its Tailscale address and fails startup
-otherwise. Real probes need `CAP_NET_RAW` for the NextTrace child (see
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §2.1).
+The dev config binds loopback. A production Agent binds an explicit **private**
+address (RFC1918, CGNAT, ULA, overlay, VPC or loopback) and fails startup for a
+wildcard/missing/public address unless explicitly allowed. Real probes need
+`CAP_NET_RAW` for the NextTrace child (see
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §2.1). Tailscale is one option, not a
+requirement.
 
 ## 5. Run the Controller (terminal 2)
 
@@ -75,11 +77,14 @@ Open **http://127.0.0.1:8080**:
    choices — you must pick one when there are several. The exact numeric IP
    being traced is always displayed.
 3. Select one or more Agents (the dev config has one; add more to compare).
-4. Choose the protocol:
+4. Optionally choose a source network interface per Agent ("Automatic" uses the
+   OS routing table; Agents advertise eligible interfaces, excluding loopback
+   and container/bridge devices).
+5. Choose the protocol:
    - **ICMP** — no port, the default.
    - **TCP** — enter the destination port (default `80`).
    - **UDP** — enter the destination port (default `33494`).
-5. Press **Start trace**. Per-node status updates arrive live; expand hops for
+6. Press **Start trace**. Per-node status updates arrive live; expand hops for
    RTT/ASN/org/geo/PTR/MPLS/probe details, switch to **Compare** for aligned
    paths and honest differences, and use **Export JSON** to download the job
    including bounded raw NextTrace output.
@@ -117,7 +122,7 @@ The Controller and the Agent each enforce their own `allowed_protocols` list.
 | --- | --- |
 | Agent: `nexttrace binary ... does not exist` | set the absolute `nexttrace.binary` path in the Agent config |
 | Agent: `nexttrace is not usable; agent starts degraded` | run `nexttrace --version` and the health endpoint; NextTrace is missing a required flag or failed capability detection |
-| Agent: `listen address ... is not assigned` | Tailscale is down or the configured IP changed; in dev mode use `127.0.0.1` with `allow_non_tailscale_bind` |
+| Agent: `listen address ... is not assigned` | the configured private address/VPN is down or the IP changed; in dev mode use `127.0.0.1` |
 | Agent: `address already in use` | another process owns port 9481; change `listen` in both configs |
 | Controller: `bind: address already in use` | change `listen` in `configs/controller.dev.json` and `public_origin` to match |
 | Resolve returns `no_addresses` | the local resolver returned only filtered addresses (or none); try a literal IP |
@@ -129,8 +134,11 @@ The Controller and the Agent each enforce their own `allowed_protocols` list.
 
 ## 8. Next steps
 
-- Production: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — systemd, Tailscale
-  ACLs, Cloudflare Tunnel/Access, safe defaults.
+- Production: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — one-command installer,
+  CI-built amd64/arm64 binaries, systemd, private networking and optional
+  Cloudflare Tunnel/Access.
+- Private networking: [docs/PRIVATE-NETWORKING.md](docs/PRIVATE-NETWORKING.md) —
+  overlay/VPC/loopback/SSH-tunnel options (Tailscale is optional, no tags).
 - API: [docs/API.md](docs/API.md) — versioned request/response schemas.
 - Security: [`SECURITY.md`](SECURITY.md) — threat model and residual risks.
 - Verification: [docs/VERIFICATION.md](docs/VERIFICATION.md) — independent

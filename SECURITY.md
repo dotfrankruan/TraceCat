@@ -52,7 +52,8 @@ that rule.
    node URLs, allowlists) is trusted admin input, protected by file permissions
    and deployment hardening.
 
-Out of scope assumptions: the host OS, systemd, Tailscale, Cloudflare Access,
+Out of scope assumptions: the host OS, systemd, the operator-chosen private
+network/overlay, Cloudflare Access,
 the operator-installed NextTrace binary and the DNS resolver are not
 compromised; clocks are synchronized; administrators do not configure
 `0.0.0.0/0`-style bypasses or expose the dev listener.
@@ -114,12 +115,21 @@ a vulnerability.
 leaks.
 **Controls:** per-Agent high-entropy bearer token required on every request;
 constant-time digest comparison; tokens only via environment variables named in
-config, never logged, never stored in SQLite, never sent to browsers; Tailscale
-WireGuard provides transport encryption/authentication and ACLs restrict which
-tag may reach port 8443. Agents bind only to the configured Tailscale address
-and refuse wildcard/missing addresses at startup.
+config, never logged, never stored in SQLite, never sent to browsers. The
+operator's private overlay/VPC (e.g. WireGuard/Tailscale, no tags required)
+restricts which host may reach the Agent port. Agents bind only to the
+configured non-public address and refuse wildcard/missing/public addresses at
+startup (public binds require an explicit opt-in and TLS/firewall).
 **Residual:** a compromised Controller process or root on the Controller can
 read configured tokens; rotate per-Agent tokens and use tailnet ACLs.
+
+### T6b. Network overlay is not authentication
+**Threat:** treating VPN/tailnet membership as authorization.
+**Controls:** every Agent request still requires a per-Agent bearer token; the
+overlay is only a transport/reachability control. TraceCat does not call a
+Tailscale API, relies on no tags, and has no device-discovery/registration path.
+**Residual:** a compromised host on the private network can reach the Agent
+port, but cannot authenticate without the token.
 
 ### T7. Controller compromise via the web surface
 **Threat:** auth bypass, CSRF, XSS, SQL injection, open redirect/proxy.
@@ -270,8 +280,9 @@ See `docs/TESTING.md` for the exact commands and the verified test matrix.
    `setcap cap_net_raw+ep` on the NextTrace binary), keep systemd sandboxing on.
    The Agent unit intentionally omits `MemoryDenyWriteExecute` because NextTrace
    v1.7.3 crashes under W^X; do not re-add it to the Agent unit.
-2. Bind Agents only to the Tailscale address; restrict reachability with
-   tailnet ACLs to the Controller tag and the Agent port.
+2. Bind Agents only to an explicit private address (overlay/VPC/loopback);
+   restrict reachability to the Controller host and the Agent port with
+   firewall/security-group/overlay rules. No tags are needed.
 3. Use a distinct random bearer token per Agent, 0600 env files, and rotate.
 4. Put Cloudflare Access (MFA) in front of the Controller and use
    `auth.mode=cloudflare`; never expose `auth.mode=dev`.

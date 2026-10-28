@@ -11,7 +11,7 @@ fixed NextTrace binary with a strictly constructed argument vector; there is no
 shell, no user-controlled executable or flags, and no generic command API.
 
 ```
- browser ──HTTPS/Cloudflare Access──> Controller ──HTTP over Tailscale──> Agents ──> nexttrace
+ browser ──HTTPS/Cloudflare Access──> Controller ──HTTP over private network──> Agents ──> nexttrace
                                       (Go + SQLite)      (Go, unprivileged)
 ```
 
@@ -55,12 +55,12 @@ shell, no user-controlled executable or flags, and no generic command API.
 | Path | Contents |
 | --- | --- |
 | `cmd/tracecat-controller`, `internal/controller` | Web/API server, DNS, auth, job scheduler, SQLite history, SSE |
-| `cmd/tracecat-agent`, `internal/agent` | Tailscale-only, token-authenticated trace runner |
+| `cmd/tracecat-agent`, `internal/agent` | Private-network, token-authenticated trace runner with per-interface selection |
 | `internal/nexttrace` | Capability detection, typed command builder, version-aware JSON parser |
 | `internal/ipguard` | Shared destination policy (default-deny + admin allowlist) |
 | `internal/model` | Versioned wire contract |
 | `internal/webui`, `web` | Embedded dashboard and its React/TS/Tailwind sources |
-| `deploy`, `configs`, `docs` | systemd units, Docker, Tailscale/Cloudflare guidance, API and security docs |
+| `deploy`, `configs`, `docs` | installer, systemd units, Docker, private-networking/Cloudflare guidance, API and security docs |
 
 ## Quick start (local development)
 
@@ -92,8 +92,8 @@ After changing dashboard sources, rebuild the committed assets with
 `make ui` (requires Node 22+/pnpm); deployed servers never run Node.
 
 See **[QUICKSTART.md](QUICKSTART.md)** for the five-minute local walkthrough, then
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for systemd, Tailscale and
-Cloudflare deployment, [docs/API.md](docs/API.md) for the wire contract,
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the CI-built binary installer,
+private networking and optional Cloudflare deployment, [docs/API.md](docs/API.md) for the wire contract,
 [`SECURITY.md`](SECURITY.md) for the threat model, and
 [docs/VERIFICATION.md](docs/VERIFICATION.md) for the independent real-host
 verification report.
@@ -103,8 +103,10 @@ verification report.
 1. Controller on a small host or container, listener on `127.0.0.1:8080`.
 2. `cloudflared` tunnel exposing the Controller hostname, protected by a
    Cloudflare Access application (MFA). TraceCat verifies the Access JWT itself.
-3. Agents on each vantage point, bound to their Tailscale IP, reached only by
-   the Controller according to tailnet ACLs, each with its own bearer token.
+3. Agents on each vantage point, bound to an explicit **private** address
+   (any overlay/VPC; Tailscale is optional and no tags are used), reachable only
+   by the Controller, each with its own bearer token. Agents advertise eligible
+   network interfaces so the dashboard can select the source interface per node.
 4. NextTrace installed on each Agent host; the Agent runs unprivileged with only
    `CAP_NET_RAW`.
 
@@ -113,8 +115,9 @@ verification report.
 - Go 1.27.x toolchain; NextTrace v1.7.1 (macOS) and v1.7.3 (Debian 13) verified
   for flag detection and JSON parsing; the parser tolerates known schema
   variations.
-- Deployed and independently verified on Debian 13 with systemd 257 and
-  Tailscale 1.104: 329 PASS / 0 FAIL / 2 environment-N/A SKIPs, including real
+- Deployed and independently verified on Debian 13 with systemd 257 and a
+  private overlay (Tailscale was used only as the test overlay; no tags):
+  329 PASS / 0 FAIL / 2 environment-N/A SKIPs, including real
   ICMP traces from two tailnet Agents, local-auth/CSRF checks and a
   zero-violation-CSP browser run (`docs/VERIFICATION.md`).
 - Tests do not require public traceroute targets, real GeoIP services, or
@@ -131,7 +134,9 @@ browser screenshots).
   sessions are intentionally not exposed.
 - Single-tenant: every authenticated user may use all configured nodes.
 - No resumable jobs after a Controller restart; bounded history only.
-- Agent transport is HTTP inside the Tailscale/WireGuard tailnet.
+- Agent transport is cleartext HTTP inside the private overlay/VPC (e.g.
+  WireGuard/Tailscale); use TLS in front of Agents only if traffic crosses an
+  untrusted network.
 - Geolocation/ASN data comes from NextTrace's third-party providers and may be
   missing or inaccurate; missing values are never invented.
 - Intermediate probe timeouts are not evidence of a broken path.

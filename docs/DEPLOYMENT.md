@@ -2,146 +2,168 @@
 
 TraceCat has two deployables:
 
-- **Controller** — one instance; serves the dashboard/API, resolves DNS, stores
-  history in SQLite, talks to Agents.
-- **Agent** — one per vantage point; binds to its Tailscale address, runs the
-  locally installed NextTrace, requires a per-Agent token.
+- **Controller** — one instance. Serves the dashboard/API, resolves DNS,
+  schedules jobs, stores history in SQLite.
+- **Agent** — one per vantage point. Binds an explicit private address, runs the
+  locally installed NextTrace binary, requires a per-Agent bearer token.
 
-The Agent is *not* an open service: it never listens on a public interface and
-never accepts a hostname or arbitrary arguments.
+Releases are built by CI for **linux/amd64** and **linux/arm64** as
+self-contained tarballs (dashboard embedded, no Node.js or runtime
+dependencies). The easiest path is the installer; manual systemd and Docker
+instructions follow for custom setups.
 
-## 0. Prerequisites
+> **Networking:** TraceCat does not require Tailscale and does not use tags.
+> Any private overlay, VPC or tunnel is fine as long as the Controller can reach
+> each Agent's `listen` address and nothing else can. See
+> [PRIVATE-NETWORKING.md](PRIVATE-NETWORKING.md).
 
-| Host | Requirements |
-| --- | --- |
-| Controller | Go-built binary (or Docker), write access to a state dir, Cloudflare Tunnel (recommended) or tailnet-only exposure |
-| Agent | Linux + systemd (recommended), Tailscale (logged in, address assigned), NextTrace installed, a dedicated unprivileged user, ability to grant `CAP_NET_RAW` (ICMP and TCP/UDP SYN probes) |
-| Network | Controller can reach Agent `listen` IP:port over Tailscale; Agents reach the Internet for traceroute/GeoIP |
+---
 
-Tests and this documentation were verified with NextTrace v1.7.3 on Debian 13,
-systemd 257 and Tailscale 1.104.
+## 1. Installer (recommended)
 
-## 1. Controller
-
-### 1.1 systemd (recommended)
+The installer supports **first install and upgrades**. It reads the matching
+release asset from GitHub, verifies its SHA-256 against `checksums.txt`,
+installs the binary, a hardened systemd unit and a validated config, creates a
+dedicated `tracecat` system user, generates secrets locally, and enables the
+service. Existing configs are preserved unless `--force` is passed (the old file
+is backed up).
 
 ```bash
-# Binaries (build with `make build-backend` locally, or download a release)
-sudo install -m 0755 bin/tracecat-controller /usr/local/bin/tracecat-controller
+curl -fsSL https://raw.githubusercontent.com/dotfrankruan/TraceCat/main/deploy/install.sh \
+  -o /tmp/tracecat-install.sh
+sudo bash /tmp/tracecat-install.sh --help
+```
 
-# Service account and directories
+### 1.1 Agent first (it prints the token the Controller needs)
+
+On each vantage point (Linux, systemd, NextTrace already installed):
+
+```bash
+sudo bash /tmp/tracecat-install.sh agent \
+  --listen 10.0.0.5:8443
+```
+
+- `--listen` must be an assigned **non-public** address (RFC1918, CGNAT, ULA,
+  loopback for local use, or an overlay address). Wildcards are refused and
+  public binds require `--allow-public-bind` explicitly.
+- NextTrace is discovered in `PATH`; override with
+  `--nexttrace /usr/local/bin/nexttrace`. The Agent runs it with `CAP_NET_RAW`
+  via the unit's ambient capability.
+- The installer generates a random bearer token into
+  `/etc/tracecat/agent.env` (`0600`) and prints the token once, together with
+  the URL to configure on the Controller. Keep it secret.
+- Optional: `--protocols icmp,tcp` to restrict probes, `--no-start` to stage
+  without starting.
+
+Verify on the Agent host:
+
+```bash
+systemctl status tracecat-agent
+ss -ltnp | grep 8443                       # only the configured private IP
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8443/v1/health  # 401
+```
+
+### 1.2 Controller
+
+On the Controller host, export each Agent token as the environment variable you
+name in the `--agent` spec (the installer writes them into
+`/etc/tracecat/controller.env`, mode `0600`; it never embeds them in JSON):
+
+```bash
+export TRACECAT_TOKEN_AGENT1='<token printed by the Agent installer>'
+
+sudo -E bash /tmp/tracecat-install.sh controller \
+  --auth cloudflare \
+  --public-origin https://trace.example.com \
+  --cf-team-domain https://your-team.cloudflareaccess.com \
+  --cf-audience '<Access application AUD tag>' \
+  --agent agent1,http://10.0.0.5:8443,TRACECAT_TOKEN_AGENT1,Tokyo,Tokyo JP,Example
+```
+
+`--agent` is repeatable:
+`id,url,token_env[,name[,location[,provider]]]`. The URL must be `https://`
+unless the host is a literal private/Tailscale/VPC IP (cleartext to public
+addresses is rejected).
+
+Auth modes:
+
+- **cloudflare** (recommended for internet exposure): the Controller verifies
+  the Cloudflare Access JWT itself (RS256/JWKS, issuer/audience/expiry). Set
+  `--cf-email` / `--cf-domain` to further restrict identities. TLS and the
+  Access application are configured in Cloudflare (see §4).
+- **local**: single-factor password login; use with a private-only listener or
+  in front of an SSO proxy. `--password-stdin` reads the password non-
+  interactively (minimum 12 characters); the installer stores only a PBKDF2
+  hash.
+- **dev**: anonymous, loopback-only. `--listen` must be `127.0.0.1:...`; never
+  expose it.
+
+The Controller listens on `127.0.0.1:8080` by default (safe behind
+`cloudflared`) and serves the embedded dashboard. If you expose it on a private
+overlay instead, pass `--listen <private-ip>:8080` and set `--public-origin` to
+the URL browsers use.
+
+If any Agent token variable is missing, the installer writes commented
+placeholders into `/etc/tracecat/controller.env` and **does not start** the
+service — fill them in and run `systemctl enable --now tracecat-controller`.
+
+### 1.3 Upgrades and rollback
+
+```bash
+# Upgrade to the latest release (keeps configs and database)
+sudo bash /tmp/tracecat-install.sh controller --version 0.1.1
+sudo bash /tmp/tracecat-install.sh agent --version 0.1.1
+
+# Rebuild config from flags (backs up the old files)
+sudo bash /tmp/tracecat-install.sh controller ... --force
+```
+
+Always install the same release on Controller and Agents. Roll back by running
+the installer with the previous `--version`; the SQLite history remains
+compatible (migrations are additive). For fully offline installs, download the
+release tarball + checksums and use `--tarball FILE --checksums FILE`.
+
+Check installed versions:
+
+```bash
+tracecat-controller -version
+tracecat-agent -version
+```
+
+---
+
+## 2. Manual systemd install
+
+Use this when you want to manage files yourself. Get the binaries either from a
+[release](https://github.com/dotfrankruan/TraceCat/releases) tarball or build
+with `make build` (Go 1.23+; Node.js is only needed for `make ui`).
+
+### 2.1 Agent
+
+```bash
 sudo useradd --system --home-dir /var/lib/tracecat --create-home \
      --shell /usr/sbin/nologin tracecat
 sudo install -d -m 0755 /etc/tracecat
-sudo install -d -m 0700 -o tracecat -g tracecat /var/lib/tracecat
-
-# Configuration: start from the example and edit it
-sudo install -m 0640 -o root -g tracecat configs/controller.example.json /etc/tracecat/controller.json
-sudo install -m 0600 -o root -g tracecat deploy/systemd/tracecat-controller.env.example /etc/tracecat/controller.env
-sudoedit /etc/tracecat/controller.json
-sudoedit /etc/tracecat/controller.env
-
-# systemd unit
-sudo install -m 0644 deploy/systemd/tracecat-controller.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now tracecat-controller
-sudo systemctl status tracecat-controller
-journalctl -u tracecat-controller -f
-```
-
-The example unit keeps the Controller on `127.0.0.1:8080` (the safe default)
-behind `cloudflared`. If you instead expose it on the tailnet, set `listen` to a
-Tailscale address and use the tailnet ACL example
-(`deploy/tailscale/acl.hujson.example`).
-
-Generate a local-auth password hash (only for `auth.mode=local`) with:
-
-```bash
-tracecat-controller -hash-password   # reads the password from stdin, prints pbkdf2-sha256$...
-```
-
-Put the hash in `/etc/tracecat/controller.env` as
-`TRACECAT_CONTROLLER_PASSWORD_HASH=...` (never in the JSON config, never in git).
-
-### 1.2 Cloudflare Tunnel + Access
-
-The Controller verifies Cloudflare Access JWTs itself, so a tunnel
-misconfiguration cannot turn it into an open proxy. Your Cloudflare deployment
-is separate; at minimum:
-
-1. Create a tunnel and expose the Controller hostname to
-   `http://127.0.0.1:8080` (see `deploy/cloudflared/config.yml.example`).
-2. Create a Cloudflare Access application for that hostname with an allow policy
-   (MFA recommended).
-3. Configure `auth.mode=cloudflare` in `controller.json` with:
-   - `team_domain`: `https://<your-team>.cloudflareaccess.com`
-   - `audience`: the Access application's Audience (AUD) tag
-   - optionally `allowed_emails` / `allowed_email_domains`
-   - if you set `csrf_secret_env`, put the named secret (>=16 random bytes) in
-     `/etc/tracecat/controller.env`; otherwise a random per-process secret is
-     generated (fine for a single Controller instance)
-4. Set `public_origin` to the public HTTPS URL so cookies are `Secure` and
-   Origin/CSRF checks match.
-
-No Cloudflare API token is needed or accepted; verification uses only the
-public JWKS endpoint of the team domain.
-
-### 1.3 Docker
-
-```bash
-sudo install -d -m 0700 -o 65532 -g 65532 /var/lib/tracecat
-sudo install -d -m 0755 /etc/tracecat
-sudo install -m 0640 -o root -g 65532 configs/controller.example.json /etc/tracecat/controller.json
-docker compose -f deploy/docker/docker-compose.yml up -d --build
-```
-
-The image is distroless, non-root, read-only, with all capabilities dropped.
-Use `network_mode: host` so the Controller can bind loopback behind
-cloudflared. The Agent image is intentionally not provided: it needs the host
-Tailscale address and the host NextTrace binary.
-
-## 2. Agent (systemd, recommended)
-
-```bash
-# 1. Install NextTrace from a trusted source (official release, distro package,
-#    or audited build) and verify the version:
-nexttrace --version
-
-# 2. Unprivileged service account
-sudo useradd --system --home-dir /var/lib/tracecat --shell /usr/sbin/nologin tracecat
-
-# 3. Binary and config
-sudo install -m 0755 bin/tracecat-agent /usr/local/bin/tracecat-agent
-sudo install -d -m 0755 /etc/tracecat
+sudo install -m 0755 tracecat-agent /usr/local/bin/tracecat-agent
 sudo install -m 0640 -o root -g tracecat configs/agent.example.json /etc/tracecat/agent.json
-sudoedit /etc/tracecat/agent.json      # node_id, listen=<tailscale-ip>:8443, nexttrace.binary
+sudo install -m 0600 -o root -g root deploy/systemd/tracecat-agent.env.example /etc/tracecat/agent.env
+sudoedit /etc/tracecat/agent.json   # node_id, listen=<private-ip>:PORT, nexttrace.binary
+sudoedit /etc/tracecat/agent.env    # TRACECAT_AGENT_TOKEN=<48 random bytes>
 
-# 4. Per-Agent secret (generate one, use the same value on the Controller)
-token=$(openssl rand -base64 48)
-sudo install -m 0600 -o root -g root /dev/null /etc/tracecat/agent.env
-printf 'TRACECAT_AGENT_TOKEN=%s\n' "$token" | sudo tee /etc/tracecat/agent.env >/dev/null
-# Add the same value to the Controller's environment as the env var named by
-# agents[].token_env in controller.json.
-
-# 5. systemd
 sudo install -m 0644 deploy/systemd/tracecat-agent.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now tracecat-agent
-sudo systemctl status tracecat-agent
-journalctl -u tracecat-agent -f
 ```
 
-The Agent **fails startup** if `listen` is a wildcard (`0.0.0.0`, `::`), is not
-assigned to a local interface, or is not in a Tailscale range while
-`security.require_tailscale_bind` is true. It never silently binds to all
-interfaces or falls back to another address.
+The Agent **fails startup** if `listen` is a wildcard, is not assigned to a
+local interface, or is globally routable while `security.allow_public_bind` is
+false. It never falls back to all interfaces. See
+[PRIVATE-NETWORKING.md](PRIVATE-NETWORKING.md) for reachability/ACL options.
 
-### 2.1 Linux capabilities for NextTrace
+#### Linux capabilities for NextTrace
 
-The Agent process itself needs no privileges. NextTrace needs `CAP_NET_RAW` to
-send ICMP probes. Two supported approaches:
-
-**A. Ambient capability on the service (default unit).** The unit sets:
+NextTrace needs `CAP_NET_RAW` for ICMP and TCP/UDP SYN probes. The shipped unit
+grants it narrowly to the unprivileged process:
 
 ```ini
 NoNewPrivileges=true
@@ -149,129 +171,169 @@ AmbientCapabilities=CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_RAW
 ```
 
-The unprivileged NextTrace child inherits only `CAP_NET_RAW`. No root, no
-setuid binary.
+The alternative is a file capability on the binary
+(`sudo setcap cap_net_raw+ep /usr/local/bin/nexttrace`) and removing the two
+capability lines. Never run the Agent as root.
 
-**B. File capability on the NextTrace binary.**
-
-```bash
-sudo setcap cap_net_raw+ep /usr/local/bin/nexttrace
-# then remove AmbientCapabilities/CapabilityBoundingSet from the unit
-```
-
-Either way, keep the systemd sandbox directives. Do **not** run the Agent as
-root "because it is easier".
-
-> **Note:** the shipped Agent unit intentionally does **not** set
-> `MemoryDenyWriteExecute=true`. NextTrace v1.7.3 SIGSEGVs under a W^X memory
-> policy (verified on Debian 13/systemd 257), so only the Controller unit keeps
-> that directive. Do not re-add it to the Agent.
-
-Verify NextTrace works under the service account before starting the Agent:
+The unit intentionally omits `MemoryDenyWriteExecute`: NextTrace v1.7.3
+SIGSEGVs under a W^X policy. Keep the remaining sandbox directives.
 
 ```bash
-sudo -u tracecat /usr/local/bin/nexttrace --version   # must print a version
+sudo -u tracecat /usr/local/bin/nexttrace --version
 sudo -u tracecat /usr/local/bin/nexttrace --json -q 1 -m 2 1.1.1.1 | head -c 200
-# If the second command fails with a permission error, fix CAP_NET_RAW (A or B).
 ```
 
-### 2.2 Multiple Agents
-
-Repeat on each vantage point with a different `node_id`, `listen` address/port
-and bearer token. Add each to `controller.json` under `agents`:
-
-```json
-{
-  "id": "tokyo-1",
-  "name": "Tokyo",
-  "location": "Tokyo, JP",
-  "provider": "DMIT",
-  "url": "http://100.64.0.11:8443",
-  "token_env": "TRACECAT_TOKEN_TOKYO_1",
-  "enabled": true
-}
-```
-
-Node URLs are administrative configuration only; there is no node registration
-API and users can never submit a URL. Use HTTPS for any non-private host.
-
-## 3. Tailscale
-
-1. Install and log in Tailscale on the Controller and each Agent.
-2. Tag nodes (`tag:tracecat-controller`, `tag:tracecat-agent`) and apply
-   `deploy/tailscale/acl.hujson.example` (adjust ports/names).
-3. Agents listen only on their tailnet address; only the Controller tag may
-   reach the Agent port.
-4. Tailnet connectivity is **not** authentication: TraceCat still requires the
-   per-Agent bearer token.
-
-Verify from the Controller host:
+### 2.2 Controller
 
 ```bash
-curl -fsS -H "Authorization: Bearer $TRACECAT_TOKEN_TOKYO_1" \
-  http://100.64.0.11:8443/v1/health | jq
+sudo install -m 0755 tracecat-controller /usr/local/bin/tracecat-controller
+sudo useradd --system --home-dir /var/lib/tracecat --create-home \
+     --shell /usr/sbin/nologin tracecat
+sudo install -d -m 0755 /etc/tracecat
+sudo install -d -m 0700 -o tracecat -g tracecat /var/lib/tracecat
+sudo install -m 0640 -o root -g tracecat configs/controller.example.json /etc/tracecat/controller.json
+sudo install -m 0600 -o root -g tracecat deploy/systemd/tracecat-controller.env.example /etc/tracecat/controller.env
+sudoedit /etc/tracecat/controller.json
+sudoedit /etc/tracecat/controller.env
+sudo install -m 0644 deploy/systemd/tracecat-controller.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now tracecat-controller
 ```
 
-## 4. Verification checklist
+Config reference: [controller-config.md](controller-config.md). Generate a
+local-auth hash with `tracecat-controller -hash-password` (reads stdin). Agent
+tokens are referenced by env-var **name** in `agents[].token_env` and must be
+set in the environment file.
+
+### 2.3 Docker (Controller only)
 
 ```bash
-# Controller process and liveness
+sudo install -d -m 0700 -o 65532 -g 65532 /var/lib/tracecat
+sudo install -d -m 0755 /etc/tracecat
+sudo install -m 0640 -o root -g 65532 configs/controller.example.json /etc/tracecat/controller.json
+sudo docker compose -f deploy/docker/docker-compose.yml up -d --build
+```
+
+The image is distroless, non-root, read-only and drops all capabilities; it
+uses host networking so the Controller can bind loopback behind a tunnel. The
+Agent is intentionally not containerized in the example: it needs a host network
+address and the host-installed NextTrace binary.
+
+---
+
+## 3. Network exposure
+
+- **Controller browser exposure:** put it behind Cloudflare Tunnel + Access
+  (§4) or expose it only on a private overlay/VPN. Never bind it to a public
+  interface without TLS and authentication in front.
+- **Controller→Agent:** private overlay or VPC only. Restrict the Agent port to
+  the Controller host, and keep the per-Agent bearer token.
+- **Agent→Internet:** required for traceroute/GeoIP. Restrict egress if your
+  policy allows; TraceCat does not proxy traffic.
+
+See [PRIVATE-NETWORKING.md](PRIVATE-NETWORKING.md) for firewall examples and
+verification commands.
+
+---
+
+## 4. Cloudflare Access (optional but recommended)
+
+TraceCat verifies the Access JWT at the origin, so a tunnel misconfiguration
+does not create an open proxy. Configuration is on your Cloudflare account:
+
+1. Create a tunnel and route the Controller hostname to
+   `http://127.0.0.1:8080` (see `deploy/cloudflared/config.yml.example`).
+2. Create a Cloudflare Access application for that hostname with an MFA-capable
+   allow policy.
+3. Use `auth.mode=cloudflare` with `team_domain` and `audience` from that
+   application; optionally restrict `allowed_emails` /
+   `allowed_email_domains`. No Cloudflare API token is needed or accepted.
+4. Set `public_origin` to the public HTTPS URL so cookies are `Secure` and
+   CSRF/Origin checks match.
+5. Keep the Controller port itself private (loopback/tailnet) — the tunnel is
+   the only ingress.
+
+---
+
+## 5. Verification checklist
+
+```bash
+# Controller process and unauthenticated liveness
 systemctl is-active tracecat-controller
 curl -fsS http://127.0.0.1:8080/healthz
 
-# Agent auth is enforced (401 without/with a wrong token)
-curl -s -o /dev/null -w '%{http_code}\n' http://<agent-tailscale-ip>:8443/v1/health
+# Agent binds only its private address and enforces auth
+ss -ltnp | grep <agent-port>
+curl -s -o /dev/null -w '%{http_code}\n' http://<agent-private-ip>:<port>/v1/health       # 401
 curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer wrong' \
-  http://<agent-tailscale-ip>:8443/v1/health
+  http://<agent-private-ip>:<port>/v1/health                                              # 401
 
-# Controller sees the node(s)
-# (authenticate through your configured mode first; dev mode only on loopback)
-
-# End-to-end: open the dashboard, resolve a domain (e.g. example.com), pick an
-# IP, select nodes, start a trace and confirm per-node results.
+# Authenticated Agent health (from the Controller host, token from agent.env)
+curl -fsS -H "Authorization: Bearer $TOKEN" http://<agent-private-ip>:<port>/v1/health | jq
 ```
 
-## 5. Operations
+Then open the dashboard: resolve a target, pick each Agent, run an ICMP trace,
+and optionally TCP/UDP traces (bounded port). One Agent failing must not fail
+the others.
 
-- **Logs:** `journalctl -u tracecat-controller` / `-u tracecat-agent`. Tokens and
-  request bodies are never logged. Repeated crash-restart loops are rate-limited
-  by systemd's default start limit (`StartLimitBurst=5` per 10 s); investigate
-  with `journalctl` and `systemctl reset-failed` before restarting manually.
-- **Version:** release binaries built with `make build` embed the git
-  version/commit/build date; ad-hoc `go build` binaries report `dev`.
-- **Database:** `/var/lib/tracecat/controller.db` (WAL enabled). History is
-  trimmed to `database.max_history_jobs`; back up by stopping the service and
-  copying the DB + `-wal`/`-shm`, or use SQLite's online backup.
-- **Token rotation:** update `/etc/tracecat/agent.env`, `systemctl restart
-  tracecat-agent`, then update the Controller environment variable and restart
-  `tracecat-controller`. Different Agents have independent tokens.
-- **NextTrace upgrades:** upgrade the binary, then restart the Agent (capability
-  detection runs at startup) and check `/v1/health` reports the new version and
-  capabilities. If a required flag disappears, the Agent refuses to start
-  rather than guessing.
-- **Troubleshooting:**
-  - *Agent exits with "listen address is not assigned"*: Tailscale is not up yet
-    or the configured IP changed. The unit `Requires=tailscaled.service`; check
-    `tailscale ip`.
-  - *`nexttrace_unavailable`*: binary path/permissions or missing required flags
-    (`--json`, `-4`, `-6`, `-m`, `-q`). Run it manually as the `tracecat` user.
-  - *Permission denied sending probes*: grant `CAP_NET_RAW` via approach A or B
-    above; check with `sudo -u tracecat nexttrace --json -q 1 -m 1 1.1.1.1`.
-  - *401 from Agent*: token mismatch or missing env var; tokens are compared
-    exactly (no trimming of intentional characters).
-  - *`target_rejected`*: destination is outside the default global-unicast
-    policy; add a narrow admin CIDR allowlist deliberately on BOTH layers
-    (`security.allowed_cidrs` in `controller.json` and in `agent.json`); never
-    `0.0.0.0/0`.
-  - *Agents trace a different path than local resolution*: expected for
-    CDN/GeoDNS; the dashboard warns about this and shows the exact IP traced.
+---
 
-## 6. Uninstall
+## 6. Operations
+
+- **Logs:** `journalctl -u tracecat-controller` / `-u tracecat-agent`. Tokens,
+  request bodies and headers are never logged. Crash-restart loops are rate-
+  limited by systemd's default start limit; inspect `journalctl` and use
+  `systemctl reset-failed` before a manual restart.
+- **Version:** release binaries embed version/commit/build date; ad-hoc
+  `go build` binaries report `dev`.
+- **Database:** `/var/lib/tracecat/controller.db` (WAL). History is trimmed to
+  `database.max_history_jobs`. For a consistent copy, stop the service and copy
+  the DB plus `-wal`/`-shm`, or use SQLite's online backup.
+- **Token rotation:** generate a new token, update the Agent env file, restart
+  the Agent, update the matching env var in `/etc/tracecat/controller.env`,
+  restart the Controller. Rotate one Agent at a time.
+- **NextTrace upgrades:** upgrade the binary, restart the Agent; capability
+  detection runs at startup. If required flags disappear, the Agent starts
+  degraded and rejects traces instead of guessing. Re-run
+  [verify/agent-remote-verify.sh](../verify/agent-remote-verify.sh) after major
+  NextTrace upgrades.
+- **Interrupted jobs:** on Controller startup, jobs left `pending`/`running` by
+  a previous process are marked `failed` (traces are never resumed silently).
+
+---
+
+## 7. Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| Installer: `checksum mismatch` | Corrupted download or wrong `--version`; retry. Never bypass verification for production. |
+| Installer: controller installs but does not start | It writes commented `# TRACECAT_TOKEN_*=...` lines when Agent token env vars are missing. Fill them in `/etc/tracecat/controller.env` and start the unit. |
+| Agent: `listen address ... is not assigned` | The configured private address is missing. Bring up the overlay/VPC interface, then restart the Agent (or add a unit dependency). |
+| Agent: `wildcard binds are refused` | Use an explicit address such as `10.0.0.5:8443`; never `0.0.0.0`. |
+| Agent: `globally routable ... allow_public_bind` | Bind a private address, or explicitly accept the risk with `security.allow_public_bind: true` plus TLS/firewall. |
+| Agent: `nexttrace binary ... does not exist` / `nexttrace_unavailable` | Fix `nexttrace.binary` (absolute path) and permissions; check `/v1/health`. |
+| Agent: `permission denied` sending probes | Grant `CAP_NET_RAW` (ambient capability or `setcap`); test as the `tracecat` user. |
+| Controller: `bind: address already in use` | Change `listen` (and `public_origin` if it embeds the port). |
+| `target_rejected` | Destination outside the global-unicast policy; add a narrow `security.allowed_cidrs` on **both** Controller and Agent. |
+| `403 csrf_failed` in dev/cloudflare mode after a Controller restart | CSRF HMAC keys are per-process unless `csrf_secret_env` is set; reload the page. Local-auth sessions survive restarts. |
+| TCP/UDP unavailable | Check `limits.allowed_protocols` (Controller), `nexttrace.allowed_protocols` (Agent) and detected `tcp`/`udp` capabilities in `/v1/health`. A port is mandatory for TCP/UDP. |
+| Interface dropdown empty | The Agent did not report any eligible interfaces: NextTrace may lack `-D/--dev`, or all interfaces are loopback/down/container/bridge. Check `/v1/health` and the `interfaces` config section. |
+| Hops show **no reply** | Intermediate routers often drop probes; this is not evidence of a broken route. |
+
+Agent health/logs should never contain tokens or executable paths; if they do,
+treat it as a security defect and report it.
+
+---
+
+## 8. Uninstall
 
 ```bash
 sudo systemctl disable --now tracecat-controller tracecat-agent
 sudo rm -f /etc/systemd/system/tracecat-*.service
 sudo rm -rf /etc/tracecat /var/lib/tracecat
 sudo rm -f /usr/local/bin/tracecat-controller /usr/local/bin/tracecat-agent
-sudo userdel tracecat
+sudo userdel tracecat   # optional
 ```
+
+Remove any tunnel/overlay ACL entries and the Cloudflare Access application that
+referenced the deployment.

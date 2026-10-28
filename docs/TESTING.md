@@ -1,8 +1,8 @@
 # Testing
 
 TraceCat's tests are hermetic: they never hit public traceroute targets, real
-GeoIP providers or the internet, and they do not require root, Tailscale
-membership or `CAP_NET_RAW`. NextTrace is replaced by a fake executable that
+GeoIP providers or the internet, and they do not require root, membership in a
+private overlay/VPC, or `CAP_NET_RAW`. NextTrace is replaced by a fake executable that
 records its argv and emits fixture JSON.
 
 ## Commands

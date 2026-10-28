@@ -7,7 +7,7 @@ schema version (`tracecat.agent.v1` / `tracecat.controller.v1`).
 TraceCat has exactly three network edges:
 
 ```
-Browser  --(same-origin HTTPS)-->  Controller  --(HTTP over Tailscale)-->  Agent  -->  nexttrace
+Browser  --(same-origin HTTPS)-->  Controller  --(HTTP over private network)-->  Agent  -->  nexttrace
 ```
 
 - The browser never talks to an Agent.
@@ -49,7 +49,7 @@ free of secrets, stack traces, environment variables and filesystem paths.
 
 ## 1. Agent API (Controller -> Agent)
 
-Base path `/v1`. The Agent listens only on its configured Tailscale IP and
+Base path `/v1`. The Agent listens only on its configured private IP address and
 requires a per-Agent bearer token on every request.
 
 ### Authentication

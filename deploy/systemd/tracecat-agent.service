@@ -1,11 +1,13 @@
 [Unit]
 Description=TraceCat Agent (secure NextTrace runner, Tailscale-only listener)
 Documentation=https://github.com/dotfrankruan/TraceCat
-After=network-online.target tailscaled.service
+After=network-online.target
 Wants=network-online.target
-# Do not start before the tailnet address exists: the Agent refuses to bind a
-# missing address and must never fall back to a wildcard listener.
-Requires=tailscaled.service
+# Do not start before the configured private address exists: the Agent refuses
+# to bind a missing address and never falls back to a wildcard listener. A
+# private overlay such as Tailscale is optional; any assigned non-public
+# address (RFC1918, CGNAT, ULA, loopback for local use) is accepted. If your
+# address only appears later, add a unit dependency on that network service.
 
 [Service]
 Type=simple

@@ -34,10 +34,14 @@ jobs:
         run: go vet ./...
       - name: tests (race detector)
         run: go test -race -count=1 ./...
-      - name: build binaries
+      - name: build binaries (linux amd64)
         run: |
           CGO_ENABLED=0 go build -trimpath -o /tmp/tracecat-controller ./cmd/tracecat-controller
           CGO_ENABLED=0 go build -trimpath -o /tmp/tracecat-agent ./cmd/tracecat-agent
+      - name: cross-compile smoke (linux arm64)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/tracecat-controller-arm64 ./cmd/tracecat-controller
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/tracecat-agent-arm64 ./cmd/tracecat-agent
 
   web:
     name: Dashboard (typecheck + static build)

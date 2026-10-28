@@ -7,7 +7,7 @@
 | Go 1.23+ | Controller, Agent, tests | `go.mod` pins 1.23 |
 | Node 22+ & pnpm 10 | Dashboard build only | **Never** needed at runtime; the Controller embeds static assets |
 | NextTrace | Agent runtime + end-to-end checks | `nexttrace --version`; tests use a fake binary |
-| Tailscale (optional) | Production Agent binding | Local dev configs use loopback with an explicit override |
+| Private overlay/VPC (optional) | Production Agent addressing | Any assigned non-public bind address is accepted; local dev uses loopback |
 
 ## Build
 
@@ -31,13 +31,13 @@ make test-race     # go test -race ./...
 ```
 
 Tests are hermetic: no public traceroute targets, no external GeoIP calls, no
-real Tailscale membership. NextTrace is replaced by a fake executable that
+membership in an overlay/VPC. NextTrace is replaced by a fake executable that
 records its argv. The tests do not require root or `CAP_NET_RAW`.
 
 ## Run the stack locally
 
-Terminal 1 — an Agent (dev config binds loopback; the Tailscale requirement is
-explicitly disabled for local development):
+Terminal 1 — an Agent (the dev config binds loopback; production requires an
+explicit private address):
 
 ```bash
 export TRACECAT_AGENT_TOKEN=local-dev-token-please-change

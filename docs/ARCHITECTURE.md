@@ -33,13 +33,18 @@ traceroute itself.
 
 ### Agent (`cmd/tracecat-agent`, `internal/agent`)
 
-- Listens only on an explicitly configured Tailscale address; startup fails if
-  the address is not assigned or is a wildcard.
+- Listens only on an explicitly configured **private** address (any overlay,
+  VPC or loopback); startup fails if the address is not assigned, is a wildcard,
+  or is globally routable without explicit `allow_public_bind`. Tailscale is an
+  optional example, not a requirement, and tags are not used.
 - Requires a per-Agent bearer token (constant-time verification) on every
   request; tailnet connectivity is not sufficient authorization.
 - Revalidates every request field independently: schema version, ids, family,
-  protocol, numeric limits, and the target IP policy (never trusts the
-  Controller).
+  protocol, bounded port, selected network interface (against its own
+  enumerated allowlist), numeric limits, and the target IP policy (never trusts
+  the Controller).
+- Advertises eligible source interfaces (loopback/down/container/bridge names
+  excluded) and maps a validated selection to a fixed NextTrace `-D` argument.
 - Builds a fixed argument vector from typed values and executes a fixed
   NextTrace binary through `exec.CommandContext` — no shell, no
   user-controlled executable or arguments.
@@ -54,8 +59,8 @@ traceroute itself.
   never a reason to guess.
 - One-shot ICMP, TCP or UDP traceroute (`-4`/`-6`, `--json`, `-m`, `-q`,
   optional `--timeout`, optional explicit `--traceroute` for ICMP when
-  detected, `-T`/`-U` plus a bounded `-p` port for TCP/UDP). MTR is not
-  supported.
+  detected, `-T`/`-U` plus a bounded `-p` port for TCP/UDP, optional
+  `-D <interface>` from the Agent's enumerated set). MTR is not supported.
 - Parses NextTrace JSON into isolated DTOs (`nexttrace.json.v1`) and then into
   stable internal models; a NextTrace schema change does not leak into the
   dashboard contract.
@@ -134,7 +139,8 @@ message broker. These are security decisions, not missing plumbing.
 - Agents: systemd on each vantage point, unprivileged service user, NextTrace
   installed by the administrator, `CAP_NET_RAW` granted narrowly (ambient
   capability or file capability on the binary).
-- Communication: HTTP over Tailscale (WireGuard-encrypted). Cleartext HTTP is
-  only accepted for private/Tailscale Agent addresses; public hosts require
-  HTTPS.
+- Communication: HTTP over a private overlay/VPC (e.g. WireGuard/Tailscale) or
+  a loopback/SSH-tunnel path. Cleartext HTTP is accepted only for non-public
+  Agent addresses; public hosts require HTTPS. No Tailscale API, tags or node
+  discovery is used.
 - SQLite database in `/var/lib/tracecat` with `0700` state directory.

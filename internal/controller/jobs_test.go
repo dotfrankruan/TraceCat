@@ -593,3 +593,274 @@ func TestRegistryHealthPoller(t *testing.T) {
 		t.Fatalf("health after close = %q, want unreachable", got)
 	}
 }
+
+func protocolJobRequest(protocol model.Protocol, port *int) model.CreateJobRequest {
+	return model.CreateJobRequest{
+		TargetIP:       "8.8.8.8",
+		OriginalTarget: "dns.example",
+		NodeIDs:        []string{"node-one"},
+		Protocol:       protocol,
+		Port:           port,
+		MaxHops:        30,
+		Queries:        3,
+		TimeoutMS:      60000,
+	}
+}
+
+func expectedAgentRequest(jobID string, protocol model.Protocol, port *int) model.AgentTraceRequest {
+	return model.AgentTraceRequest{
+		SchemaVersion: model.AgentSchemaVersion,
+		JobID:         jobID,
+		NodeID:        "node-one",
+		TargetIP:      "8.8.8.8",
+		Family:        model.FamilyIPv4,
+		Protocol:      protocol,
+		Port:          port,
+		MaxHops:       30,
+		Queries:       3,
+		TimeoutMS:     60000,
+	}
+}
+
+func TestJobTCPExactDispatchAndEcho(t *testing.T) {
+	a1 := newFakeAgent(t, "node-one")
+	h := newHarness(t, withAgents(a1))
+
+	port := 443
+	resp, body := h.createJob(protocolJobRequest(model.ProtocolTCP, &port))
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("create tcp job status = %d body=%s", resp.StatusCode, body)
+	}
+	created := decodeJSONResponse[model.JobResponse](t, resp, body).Job
+	if created.Protocol != model.ProtocolTCP || created.Port == nil || *created.Port != 443 {
+		t.Fatalf("created job protocol/port = %s/%v", created.Protocol, created.Port)
+	}
+	final := waitForTerminalJob(t, h.manager, created.ID)
+	if final.Status != model.JobCompleted {
+		t.Fatalf("job status = %q", final.Status)
+	}
+
+	dispatched, rawBody := a1.lastTraceRequest()
+	if dispatched.Protocol != model.ProtocolTCP || dispatched.Port == nil || *dispatched.Port != 443 {
+		t.Fatalf("dispatched request protocol/port = %s/%v", dispatched.Protocol, dispatched.Port)
+	}
+	want, err := json.Marshal(expectedAgentRequest(created.ID, model.ProtocolTCP, &port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rawBody) != string(want) {
+		t.Fatalf("dispatched body mismatch:\n got: %s\nwant: %s", rawBody, want)
+	}
+	if !strings.Contains(string(rawBody), `"port":443`) {
+		t.Fatalf("tcp dispatch is missing the port: %s", rawBody)
+	}
+
+	// GET job echoes protocol/port.
+	resp, body = h.get("/api/v1/jobs/" + created.ID)
+	got := decodeJSONResponse[model.JobResponse](t, resp, body).Job
+	if got.Protocol != model.ProtocolTCP || got.Port == nil || *got.Port != 443 {
+		t.Fatalf("fetched protocol/port = %s/%v", got.Protocol, got.Port)
+	}
+
+	// History includes protocol/port.
+	resp, body = h.get("/api/v1/jobs")
+	list := decodeJSONResponse[model.JobList](t, resp, body)
+	if len(list.Jobs) != 1 || list.Jobs[0].Protocol != model.ProtocolTCP || list.Jobs[0].Port == nil || *list.Jobs[0].Port != 443 {
+		t.Fatalf("history item = %+v", list.Jobs)
+	}
+
+	// Export includes protocol/port on the job.
+	resp, body = h.get("/api/v1/jobs/" + created.ID + "/export")
+	export := decodeJSONResponse[model.JobExport](t, resp, body)
+	if export.Job.Protocol != model.ProtocolTCP || export.Job.Port == nil || *export.Job.Port != 443 {
+		t.Fatalf("export protocol/port = %s/%v", export.Job.Protocol, export.Job.Port)
+	}
+}
+
+func TestJobUDPExactDispatch(t *testing.T) {
+	a1 := newFakeAgent(t, "node-one")
+	h := newHarness(t, withAgents(a1))
+	port := model.DefaultUDPPort
+	resp, body := h.createJob(protocolJobRequest(model.ProtocolUDP, &port))
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("create udp job status = %d body=%s", resp.StatusCode, body)
+	}
+	id := decodeJSONResponse[model.JobResponse](t, resp, body).Job.ID
+	final := waitForTerminalJob(t, h.manager, id)
+	if final.Status != model.JobCompleted || final.Protocol != model.ProtocolUDP || final.Port == nil || *final.Port != port {
+		t.Fatalf("udp job = %+v", final)
+	}
+	dispatched, rawBody := a1.lastTraceRequest()
+	if dispatched.Protocol != model.ProtocolUDP || dispatched.Port == nil || *dispatched.Port != port {
+		t.Fatalf("dispatched udp request = %s/%v", dispatched.Protocol, dispatched.Port)
+	}
+	want, err := json.Marshal(expectedAgentRequest(id, model.ProtocolUDP, &port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rawBody) != string(want) {
+		t.Fatalf("dispatched body mismatch:\n got: %s\nwant: %s", rawBody, want)
+	}
+}
+
+func TestJobICMPDispatchOmitsPort(t *testing.T) {
+	a1 := newFakeAgent(t, "node-one")
+	h := newHarness(t, withAgents(a1))
+	resp, body := h.createJob(protocolJobRequest(model.ProtocolICMP, nil))
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("create icmp job status = %d body=%s", resp.StatusCode, body)
+	}
+	id := decodeJSONResponse[model.JobResponse](t, resp, body).Job.ID
+	final := waitForTerminalJob(t, h.manager, id)
+	if final.Status != model.JobCompleted || final.Protocol != model.ProtocolICMP || final.Port != nil {
+		t.Fatalf("icmp job = %+v", final)
+	}
+	dispatched, rawBody := a1.lastTraceRequest()
+	if dispatched.Protocol != model.ProtocolICMP || dispatched.Port != nil {
+		t.Fatalf("dispatched icmp request = %s/%v", dispatched.Protocol, dispatched.Port)
+	}
+	want, err := json.Marshal(expectedAgentRequest(id, model.ProtocolICMP, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rawBody) != string(want) {
+		t.Fatalf("dispatched body mismatch:\n got: %s\nwant: %s", rawBody, want)
+	}
+	if strings.Contains(string(rawBody), `"port"`) {
+		t.Fatalf("icmp dispatch must omit the port field entirely: %s", rawBody)
+	}
+}
+
+func TestJobProtocolPortValidation(t *testing.T) {
+	a1 := newFakeAgent(t, "node-one")
+	h := newHarness(t, withAgents(a1))
+	port := func(v int) *int { return &v }
+	cases := []struct {
+		name     string
+		protocol model.Protocol
+		port     *int
+	}{
+		{"tcp missing port", model.ProtocolTCP, nil},
+		{"udp missing port", model.ProtocolUDP, nil},
+		{"tcp zero port", model.ProtocolTCP, port(0)},
+		{"tcp port above max", model.ProtocolTCP, port(model.MaxPort + 1)},
+		{"udp negative port", model.ProtocolUDP, port(-1)},
+		{"icmp with port", model.ProtocolICMP, port(443)},
+		{"invalid protocol", model.Protocol("gre"), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, body := h.createJob(protocolJobRequest(tc.protocol, tc.port))
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+			}
+			envelope := decodeJSONResponse[model.ErrorResponse](t, resp, body)
+			if envelope.Error == nil || envelope.Error.Code != model.ErrInvalidRequest {
+				t.Fatalf("unexpected error: %+v", envelope.Error)
+			}
+		})
+	}
+	if a1.traceCount() != 0 {
+		t.Fatalf("rejected jobs must never reach the Agent")
+	}
+
+	// Bounds accepted.
+	for _, value := range []int{model.MinPort, model.MaxPort} {
+		boundary := value
+		resp, body := h.createJob(protocolJobRequest(model.ProtocolTCP, &boundary))
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("tcp port %d status = %d body=%s", value, resp.StatusCode, body)
+		}
+		waitForTerminalJob(t, h.manager, decodeJSONResponse[model.JobResponse](t, resp, body).Job.ID)
+	}
+
+	// Port must be a JSON integer, never a string or fraction.
+	for _, badPort := range []any{"443", 443.5} {
+		req := map[string]any{
+			"target_ip": "8.8.8.8", "original_target": "dns.example",
+			"node_ids": []string{"node-one"}, "protocol": "tcp", "port": badPort,
+			"max_hops": 30, "queries": 3, "timeout_ms": 60000,
+		}
+		resp, body := h.post("/api/v1/jobs", req)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("bad port %v status = %d body=%s", badPort, resp.StatusCode, body)
+		}
+	}
+}
+
+func TestJobProtocolAllowlist(t *testing.T) {
+	a1 := newFakeAgent(t, "node-one")
+	h := newHarness(t, withAgents(a1), withDocMutation(func(doc map[string]any) {
+		doc["limits"] = map[string]any{"allowed_protocols": []any{"tcp"}}
+	}))
+
+	resp, body := h.get("/api/v1/session")
+	session := decodeJSONResponse[model.Session](t, resp, body)
+	if strings.Join(session.Limits.Protocols, ",") != "tcp" {
+		t.Fatalf("session protocols = %v", session.Limits.Protocols)
+	}
+
+	// ICMP is disabled for this Controller instance.
+	resp, body = h.createJob(protocolJobRequest(model.ProtocolICMP, nil))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("disabled protocol status = %d body=%s", resp.StatusCode, body)
+	}
+	port := 443
+	resp, body = h.createJob(protocolJobRequest(model.ProtocolTCP, &port))
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("allowed protocol status = %d body=%s", resp.StatusCode, body)
+	}
+	waitForTerminalJob(t, h.manager, decodeJSONResponse[model.JobResponse](t, resp, body).Job.ID)
+}
+
+func TestSessionLimitsProtocolsDefault(t *testing.T) {
+	h := newHarness(t, withAgents(newFakeAgent(t, "node-one")))
+	resp, body := h.get("/api/v1/session")
+	session := decodeJSONResponse[model.Session](t, resp, body)
+	if strings.Join(session.Limits.Protocols, ",") != "icmp,tcp,udp" {
+		t.Fatalf("default session protocols = %v", session.Limits.Protocols)
+	}
+}
+
+func TestAgentResponseProtocolPortMismatch(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(resp *model.AgentTraceResponse)
+	}{
+		{"protocol mismatch", func(resp *model.AgentTraceResponse) { resp.Protocol = model.ProtocolUDP }},
+		{"port mismatch", func(resp *model.AgentTraceResponse) { resp.Port = intPtr(8443) }},
+		{"missing port", func(resp *model.AgentTraceResponse) { resp.Port = nil }},
+		{"icmp port echoed", func(resp *model.AgentTraceResponse) { resp.Port = intPtr(443) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a1 := newFakeAgent(t, "node-one")
+			a1.setTraceHandler(func(w http.ResponseWriter, _ *http.Request, req model.AgentTraceRequest) {
+				resp := completedTraceResponse(req)
+				tc.mutate(&resp)
+				writeTestJSON(t, w, resp)
+			})
+			h := newHarness(t, withAgents(a1))
+			var port *int
+			protocol := model.ProtocolTCP
+			if tc.name == "icmp port echoed" {
+				protocol = model.ProtocolICMP
+			} else {
+				value := 443
+				port = &value
+			}
+			resp, body := h.createJob(protocolJobRequest(protocol, port))
+			if resp.StatusCode != http.StatusAccepted {
+				t.Fatalf("create job status = %d body=%s", resp.StatusCode, body)
+			}
+			id := decodeJSONResponse[model.JobResponse](t, resp, body).Job.ID
+			final := waitForTerminalJob(t, h.manager, id)
+			if final.Nodes[0].Status != model.NodeFailed {
+				t.Fatalf("node status = %q, want failed", final.Nodes[0].Status)
+			}
+			if final.Nodes[0].Error == nil || final.Nodes[0].Error.Code != model.ErrParseError {
+				t.Fatalf("unexpected node error: %+v", final.Nodes[0].Error)
+			}
+		})
+	}
+}

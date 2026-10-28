@@ -225,8 +225,18 @@ func validateAgentTraceResponse(resp *model.AgentTraceResponse, req *model.Agent
 	if resp.Family != "" && resp.Family != req.Family {
 		return newAgentCallError(agentErrProtocol, model.ErrParseError, "agent response family does not match the request")
 	}
-	if resp.Protocol != "" && resp.Protocol != req.Protocol {
+	if !resp.Protocol.Valid() || resp.Protocol != req.Protocol {
 		return newAgentCallError(agentErrProtocol, model.ErrParseError, "agent response protocol does not match the request")
+	}
+	if err := model.ValidatePortForProtocol(resp.Protocol, resp.Port); err != nil {
+		return newAgentCallError(agentErrProtocol, model.ErrParseError, "agent response port does not match the request")
+	}
+	if req.Protocol.RequiresPort() {
+		if resp.Port == nil || req.Port == nil || *resp.Port != *req.Port {
+			return newAgentCallError(agentErrProtocol, model.ErrParseError, "agent response port does not match the request")
+		}
+	} else if resp.Port != nil {
+		return newAgentCallError(agentErrProtocol, model.ErrParseError, "agent response must omit port for icmp")
 	}
 	return nil
 }

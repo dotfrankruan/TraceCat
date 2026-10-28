@@ -178,6 +178,35 @@ of hardcoding them.
 | `limits.max_resolves_per_minute` | 120 | 1..10000 | per-client `/resolve` rate |
 | `limits.max_raw_result_bytes` | 1048576 | 0..16777216 | per-node raw NextTrace result retained for export; larger output is dropped |
 | `limits.max_history_jobs` | 200 | 1..10000 | alias of `database.max_history_jobs` (must agree if both set) |
+| `limits.allowed_protocols` | `["icmp","tcp","udp"]` | subset of `icmp`, `tcp`, `udp` | Controller-side protocol allowlist |
+
+### Protocols and ports
+
+`limits.allowed_protocols` is the Controller's protocol allowlist. It defaults
+to all MVP protocols (`icmp`, `tcp`, `udp`) when omitted. The list is validated
+with `model.ParseProtocolList` at startup: unknown names, duplicates and an
+explicitly empty list fail startup. Order is preserved and the normalized list
+is exposed to the frontend as `limits.protocols` in `GET /api/v1/session`, so
+the UI only offers protocols the Controller will dispatch.
+
+`POST /api/v1/jobs` accepts `protocol` plus an optional integer `port`:
+
+- `icmp`: `port` must be omitted; a present port, range, string, service name
+  or list is rejected with `400 invalid_request`.
+- `tcp`/`udp`: `port` is required and must be an integer in `1..65535`.
+  Missing, out-of-range, fractional or non-integer values are rejected with
+  `400 invalid_request`. The UI pre-fills NextTrace's conventional defaults
+  (80/TCP, 33494/UDP) but the Controller never silently substitutes a port.
+- a valid protocol that is not in `limits.allowed_protocols` is rejected with
+  `400 invalid_request`.
+
+The Controller revalidates everything server-side, then dispatches the
+normalized protocol and port in the Agent request body; for `icmp` the `port`
+field is omitted entirely. Agent responses must echo the same protocol and, for
+`tcp`/`udp`, the same port; a mismatch marks that node failed with
+`agent_error` without failing other nodes. Jobs, history entries and exports
+include `protocol` and, for `tcp`/`udp`, `port`. History rows written before
+this feature was deployed may show an empty protocol until they age out.
 
 ### `agents` (array, required, 1..16 entries)
 

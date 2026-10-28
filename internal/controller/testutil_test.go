@@ -31,13 +31,14 @@ type fakeAgent struct {
 	token  string
 	srv    *httptest.Server
 
-	mu         sync.Mutex
-	healthHits int
-	traceHits  int
-	lastTrace  model.AgentTraceRequest
-	lastAuth   string
-	traceFn    func(w http.ResponseWriter, r *http.Request, req model.AgentTraceRequest)
-	healthFn   func(w http.ResponseWriter, r *http.Request)
+	mu           sync.Mutex
+	healthHits   int
+	traceHits    int
+	lastTrace    model.AgentTraceRequest
+	lastTraceRaw []byte
+	lastAuth     string
+	traceFn      func(w http.ResponseWriter, r *http.Request, req model.AgentTraceRequest)
+	healthFn     func(w http.ResponseWriter, r *http.Request)
 }
 
 func newFakeAgent(t *testing.T, nodeID string) *fakeAgent {
@@ -104,8 +105,13 @@ func (f *fakeAgent) handleTrace(w http.ResponseWriter, r *http.Request) {
 		writeTestJSONStatus(f.t, w, http.StatusUnauthorized, model.Err(model.ErrUnauthorized, "unauthorized"))
 		return
 	}
+	rawBody, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	if err != nil {
+		writeTestJSONStatus(f.t, w, http.StatusBadRequest, model.Err(model.ErrInvalidRequest, "invalid body"))
+		return
+	}
 	var req model.AgentTraceRequest
-	dec := json.NewDecoder(io.LimitReader(r.Body, 64<<10))
+	dec := json.NewDecoder(bytes.NewReader(rawBody))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		writeTestJSONStatus(f.t, w, http.StatusBadRequest, model.Err(model.ErrInvalidRequest, "invalid body"))
@@ -113,6 +119,7 @@ func (f *fakeAgent) handleTrace(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.lastTrace = req
+	f.lastTraceRaw = append([]byte(nil), rawBody...)
 	traceFn := f.traceFn
 	f.mu.Unlock()
 	if traceFn != nil {
@@ -132,6 +139,12 @@ func (f *fakeAgent) setHealthHandler(fn func(w http.ResponseWriter, r *http.Requ
 	f.mu.Lock()
 	f.healthFn = fn
 	f.mu.Unlock()
+}
+
+func (f *fakeAgent) lastTraceRequest() (model.AgentTraceRequest, []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastTrace, append([]byte(nil), f.lastTraceRaw...)
 }
 
 func (f *fakeAgent) traceCount() int {
@@ -157,6 +170,7 @@ func completedTraceResponse(req model.AgentTraceRequest) model.AgentTraceRespons
 		TargetIP:         req.TargetIP,
 		Family:           req.Family,
 		Protocol:         req.Protocol,
+		Port:             clonePort(req.Port),
 		StartedAt:        started.Format(time.RFC3339Nano),
 		EndedAt:          started.Add(1500 * time.Millisecond).Format(time.RFC3339Nano),
 		DurationMS:       1500,

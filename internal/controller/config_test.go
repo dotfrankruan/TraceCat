@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dotfrankruan/tracecat/internal/model"
 )
 
 const (
@@ -131,6 +133,21 @@ func TestLoadConfigValidDev(t *testing.T) {
 	}
 	if cfg.SessionLimits().MaxHistoryJobs != 200 {
 		t.Fatalf("session limits = %+v", cfg.SessionLimits())
+	}
+	wantProtocols := []string{"icmp", "tcp", "udp"}
+	gotProtocols := cfg.SessionLimits().Protocols
+	if len(gotProtocols) != len(wantProtocols) {
+		t.Fatalf("session protocols = %v, want %v", gotProtocols, wantProtocols)
+	}
+	for i := range wantProtocols {
+		if gotProtocols[i] != wantProtocols[i] {
+			t.Fatalf("session protocols = %v, want %v", gotProtocols, wantProtocols)
+		}
+	}
+	for _, protocol := range []model.Protocol{model.ProtocolICMP, model.ProtocolTCP, model.ProtocolUDP} {
+		if !cfg.IsProtocolAllowed(protocol) {
+			t.Fatalf("default allowlist should allow %s", protocol)
+		}
 	}
 }
 
@@ -475,6 +492,30 @@ func TestLoadConfigValidationErrors(t *testing.T) {
 			wantSub: "log_level",
 		},
 		{
+			name: "unknown allowed protocol",
+			base: baseDevConfigDoc,
+			mutate: func(_ *testing.T, doc map[string]any) {
+				doc["limits"] = map[string]any{"allowed_protocols": []any{"icmp", "gre"}}
+			},
+			wantSub: "allowed_protocols",
+		},
+		{
+			name: "duplicate allowed protocol",
+			base: baseDevConfigDoc,
+			mutate: func(_ *testing.T, doc map[string]any) {
+				doc["limits"] = map[string]any{"allowed_protocols": []any{"tcp", "tcp"}}
+			},
+			wantSub: "duplicate protocol",
+		},
+		{
+			name: "explicitly empty allowed protocols",
+			base: baseDevConfigDoc,
+			mutate: func(_ *testing.T, doc map[string]any) {
+				doc["limits"] = map[string]any{"allowed_protocols": []any{}}
+			},
+			wantSub: "at least one protocol",
+		},
+		{
 			name: "request timeout too small for max execution",
 			base: baseDevConfigDoc,
 			mutate: func(_ *testing.T, doc map[string]any) {
@@ -636,6 +677,36 @@ func TestShippedExampleConfigsLoad(t *testing.T) {
 	}
 	if !prod.IsHTTPS() {
 		t.Fatal("example public_origin should be https")
+	}
+	wantProtocols := []string{"icmp", "tcp", "udp"}
+	for _, cfg := range []*Config{dev, prod} {
+		got := cfg.SessionLimits().Protocols
+		if strings.Join(got, ",") != strings.Join(wantProtocols, ",") {
+			t.Fatalf("shipped config protocols = %v, want %v", got, wantProtocols)
+		}
+	}
+}
+
+func TestAllowedProtocolsSubsetAndNormalization(t *testing.T) {
+	setAgentTokenEnv(t)
+	doc := baseDevConfigDoc()
+	doc["limits"] = map[string]any{"allowed_protocols": []any{" UDP ", "icmp"}}
+	cfg, err := LoadConfig(writeConfigDoc(t, doc))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	got := cfg.SessionLimits().Protocols
+	if strings.Join(got, ",") != "udp,icmp" {
+		t.Fatalf("protocols = %v, want [udp icmp] order preserved", got)
+	}
+	if cfg.IsProtocolAllowed(model.ProtocolTCP) {
+		t.Fatal("tcp should be disabled by the configured allowlist")
+	}
+	if !cfg.IsProtocolAllowed(model.ProtocolUDP) || !cfg.IsProtocolAllowed(model.ProtocolICMP) {
+		t.Fatal("udp/icmp should be enabled")
+	}
+	if len(cfg.AllowedProtocols()) != 2 {
+		t.Fatalf("AllowedProtocols() = %v", cfg.AllowedProtocols())
 	}
 }
 

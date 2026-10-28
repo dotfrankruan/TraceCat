@@ -36,7 +36,12 @@
     "max_concurrent_jobs": 4,
     "max_concurrent_traces": 4,
     "max_resolves_per_minute": 120,
-    "max_raw_result_bytes": 1048576
+    "max_raw_result_bytes": 1048576,
+    "allowed_protocols": [
+      "icmp",
+      "tcp",
+      "udp"
+    ]
   },
   "security": {
     "allowed_cidrs": []

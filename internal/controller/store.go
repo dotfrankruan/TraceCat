@@ -98,6 +98,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     target_ip       TEXT NOT NULL,
     original_target TEXT NOT NULL,
     family          TEXT NOT NULL,
+    protocol        TEXT NOT NULL DEFAULT '',
+    port            INTEGER,
     created_at      TEXT NOT NULL,
     ended_at        TEXT NOT NULL DEFAULT '',
     summary_json    TEXT NOT NULL,
@@ -128,7 +130,70 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
 		return err
 	}
+	// Databases created before TCP/UDP support lack the protocol/port list
+	// columns. Add them in place and backfill from the full job JSON so
+	// upgraded deployments keep honest history. The backfill is idempotent and
+	// runs unconditionally, which also repairs a migration interrupted between
+	// the ALTER and the UPDATE.
+	if _, _, err := s.ensureJobColumns(ctx); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE jobs SET protocol = LOWER(COALESCE(json_extract(job_json, '$.protocol'), ''))
+WHERE protocol = ''`); err != nil {
+		return fmt.Errorf("store: backfill job protocol: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE jobs SET port = CAST(json_extract(job_json, '$.port') AS INTEGER)
+WHERE port IS NULL AND json_extract(job_json, '$.port') IS NOT NULL`); err != nil {
+		return fmt.Errorf("store: backfill job port: %w", err)
+	}
 	return nil
+}
+
+// ensureJobColumns adds the protocol/port history columns to databases created
+// by earlier releases. It reports which columns were added so callers can
+// backfill exactly once.
+func (s *Store) ensureJobColumns(ctx context.Context) (protocolAdded, portAdded bool, err error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(jobs)`)
+	if err != nil {
+		return false, false, fmt.Errorf("store: inspect job schema: %w", err)
+	}
+	columns := make(map[string]struct{}, 12)
+	for rows.Next() {
+		var (
+			cid          int
+			name         string
+			columnType   string
+			notNull      int
+			defaultValue any
+			primaryKey   int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return false, false, fmt.Errorf("store: inspect job schema: %w", err)
+		}
+		columns[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, false, fmt.Errorf("store: inspect job schema: %w", err)
+	}
+	rows.Close()
+
+	if _, ok := columns["protocol"]; !ok {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN protocol TEXT NOT NULL DEFAULT ''`); err != nil {
+			return false, false, fmt.Errorf("store: add job protocol column: %w", err)
+		}
+		protocolAdded = true
+	}
+	if _, ok := columns["port"]; !ok {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN port INTEGER`); err != nil {
+			return false, false, fmt.Errorf("store: add job port column: %w", err)
+		}
+		portAdded = true
+	}
+	return protocolAdded, portAdded, nil
 }
 
 // Close releases the database handle.
@@ -157,16 +222,22 @@ func (s *Store) SaveJob(ctx context.Context, job *model.Job, raw map[string]json
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	var portValue any
+	if job.Port != nil {
+		portValue = *job.Port
+	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO jobs (id, created_unix, status, target_ip, original_target, family, created_at, ended_at, summary_json, job_json)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO jobs (id, created_unix, status, target_ip, original_target, family, protocol, port, created_at, ended_at, summary_json, job_json)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     status = excluded.status,
+    protocol = excluded.protocol,
+    port = excluded.port,
     ended_at = excluded.ended_at,
     summary_json = excluded.summary_json,
     job_json = excluded.job_json`,
 		job.ID, createdUnix, string(job.Status), job.TargetIP, job.OriginalTarget, string(job.Family),
-		job.CreatedAt, job.EndedAt, string(summaryJSON), string(jobJSON)); err != nil {
+		string(job.Protocol), portValue, job.CreatedAt, job.EndedAt, string(summaryJSON), string(jobJSON)); err != nil {
 		return fmt.Errorf("store: save job: %w", err)
 	}
 
@@ -323,7 +394,7 @@ func (s *Store) ListJobs(ctx context.Context, limit int) ([]model.JobListItem, e
 		limit = s.maxHistory
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, status, target_ip, original_target, family, created_at, ended_at, summary_json
+SELECT id, status, target_ip, original_target, family, protocol, port, created_at, ended_at, summary_json
 FROM jobs ORDER BY created_unix DESC, rowid DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("store: list jobs: %w", err)
@@ -336,14 +407,21 @@ FROM jobs ORDER BY created_unix DESC, rowid DESC LIMIT ?`, limit)
 			item        model.JobListItem
 			status      string
 			family      string
+			protocol    string
+			port        sql.NullInt64
 			summaryJSON string
 		)
 		if err := rows.Scan(&item.ID, &status, &item.TargetIP, &item.OriginalTarget, &family,
-			&item.CreatedAt, &item.EndedAt, &summaryJSON); err != nil {
+			&protocol, &port, &item.CreatedAt, &item.EndedAt, &summaryJSON); err != nil {
 			return nil, fmt.Errorf("store: scan job list: %w", err)
 		}
 		item.Status = model.JobStatus(status)
 		item.Family = model.IPFamily(family)
+		item.Protocol = model.Protocol(protocol)
+		if port.Valid {
+			portValue := int(port.Int64)
+			item.Port = &portValue
+		}
 		if err := json.Unmarshal([]byte(summaryJSON), &item.Summary); err != nil {
 			return nil, fmt.Errorf("store: decode job summary: %w", err)
 		}

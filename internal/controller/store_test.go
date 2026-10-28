@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -327,5 +328,189 @@ func TestStoreMarkInterruptedJobs(t *testing.T) {
 	again, err := store.MarkInterruptedJobs(ctx)
 	if err != nil || again != 0 {
 		t.Fatalf("second MarkInterruptedJobs = %d, %v; want 0, nil", again, err)
+	}
+}
+
+func intPtr(v int) *int { return &v }
+
+func TestStoreJobProtocolAndPort(t *testing.T) {
+	store := testStore(t, 10)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	tcpJob := sampleJob("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee1", now, model.JobCompleted)
+	tcpJob.Protocol = model.ProtocolTCP
+	tcpJob.Port = intPtr(443)
+	if err := store.SaveJob(ctx, tcpJob, nil); err != nil {
+		t.Fatalf("SaveJob tcp: %v", err)
+	}
+	udpJob := sampleJob("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee2", now.Add(time.Second), model.JobCompleted)
+	udpJob.Protocol = model.ProtocolUDP
+	udpJob.Port = intPtr(model.DefaultUDPPort)
+	if err := store.SaveJob(ctx, udpJob, nil); err != nil {
+		t.Fatalf("SaveJob udp: %v", err)
+	}
+	icmpJob := sampleJob("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeee3", now.Add(2*time.Second), model.JobCompleted)
+	if err := store.SaveJob(ctx, icmpJob, nil); err != nil {
+		t.Fatalf("SaveJob icmp: %v", err)
+	}
+
+	gotTCP, err := store.GetJob(ctx, tcpJob.ID)
+	if err != nil {
+		t.Fatalf("GetJob tcp: %v", err)
+	}
+	if gotTCP.Protocol != model.ProtocolTCP || gotTCP.Port == nil || *gotTCP.Port != 443 {
+		t.Fatalf("tcp job protocol/port not persisted: %+v", gotTCP)
+	}
+	gotICMP, err := store.GetJob(ctx, icmpJob.ID)
+	if err != nil {
+		t.Fatalf("GetJob icmp: %v", err)
+	}
+	if gotICMP.Protocol != model.ProtocolICMP || gotICMP.Port != nil {
+		t.Fatalf("icmp job must not carry a port: %+v", gotICMP)
+	}
+
+	list, err := store.ListJobs(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if len(list) != 3 {
+		t.Fatalf("list length = %d", len(list))
+	}
+	// Newest first: icmp, udp, tcp.
+	if list[0].Protocol != model.ProtocolICMP || list[0].Port != nil {
+		t.Fatalf("newest list item = %+v", list[0])
+	}
+	if list[1].Protocol != model.ProtocolUDP || list[1].Port == nil || *list[1].Port != model.DefaultUDPPort {
+		t.Fatalf("udp list item = %+v", list[1])
+	}
+	if list[2].Protocol != model.ProtocolTCP || list[2].Port == nil || *list[2].Port != 443 {
+		t.Fatalf("tcp list item = %+v", list[2])
+	}
+}
+
+const legacySchemaSQL = `
+CREATE TABLE jobs (
+    id              TEXT PRIMARY KEY,
+    created_unix    INTEGER NOT NULL,
+    status          TEXT NOT NULL,
+    target_ip       TEXT NOT NULL,
+    original_target TEXT NOT NULL,
+    family          TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    ended_at        TEXT NOT NULL DEFAULT '',
+    summary_json    TEXT NOT NULL,
+    job_json        TEXT NOT NULL
+);
+CREATE TABLE job_nodes (
+    job_id     TEXT NOT NULL,
+    node_id    TEXT NOT NULL,
+    node_json  TEXT NOT NULL,
+    raw_result TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (job_id, node_id)
+);
+CREATE TABLE sessions (
+    token_hash   TEXT PRIMARY KEY,
+    subject      TEXT NOT NULL,
+    email        TEXT NOT NULL DEFAULT '',
+    csrf_token   TEXT NOT NULL,
+    created_unix INTEGER NOT NULL,
+    expires_unix INTEGER NOT NULL
+);
+`
+
+func TestStoreMigratesLegacyJobsWithoutProtocolColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	dsn, err := sqliteDSN(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(legacySchemaSQL); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	created := time.Now().UTC().Add(-time.Hour)
+	legacy := sampleJob("fffffffffffffffffffffffffffffff1", created, model.JobCompleted)
+	jobJSON, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaryJSON, err := json.Marshal(legacy.Summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+INSERT INTO jobs (id, created_unix, status, target_ip, original_target, family, created_at, ended_at, summary_json, job_json)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		legacy.ID, created.UnixNano(), string(legacy.Status), legacy.TargetIP, legacy.OriginalTarget,
+		string(legacy.Family), legacy.CreatedAt, legacy.EndedAt, string(summaryJSON), string(jobJSON)); err != nil {
+		t.Fatalf("insert legacy job: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenStore(path, 10)
+	if err != nil {
+		t.Fatalf("OpenStore legacy: %v", err)
+	}
+	defer store.Close()
+
+	// Columns were added in place.
+	rows, err := store.db.Query(`PRAGMA table_info(jobs)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid          int
+			name         string
+			columnType   string
+			notNull      int
+			defaultValue any
+			primaryKey   int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = true
+	}
+	rows.Close()
+	if !columns["protocol"] || !columns["port"] {
+		t.Fatalf("migration did not add columns: %v", columns)
+	}
+
+	ctx := context.Background()
+	list, err := store.ListJobs(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListJobs legacy: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("legacy list length = %d", len(list))
+	}
+	if list[0].Protocol != model.ProtocolICMP {
+		t.Fatalf("legacy protocol was not backfilled: %+v", list[0])
+	}
+	if list[0].Port != nil {
+		t.Fatalf("legacy icmp row must not have a port: %+v", list[0])
+	}
+
+	// New rows work normally after the in-place migration.
+	tcpJob := sampleJob("fffffffffffffffffffffffffffffff2", time.Now().UTC(), model.JobCompleted)
+	tcpJob.Protocol = model.ProtocolTCP
+	tcpJob.Port = intPtr(8443)
+	if err := store.SaveJob(ctx, tcpJob, nil); err != nil {
+		t.Fatalf("SaveJob after migration: %v", err)
+	}
+	list, err = store.ListJobs(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListJobs after migration: %v", err)
+	}
+	if len(list) != 2 || list[0].Protocol != model.ProtocolTCP || list[0].Port == nil || *list[0].Port != 8443 {
+		t.Fatalf("new tcp row not listed first: %+v", list)
 	}
 }

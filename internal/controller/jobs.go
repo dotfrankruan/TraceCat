@@ -180,7 +180,8 @@ func (m *Manager) CreateJob(ctx context.Context, principal *Principal, clientIP 
 		TargetIP:       plan.target.String(),
 		OriginalTarget: plan.originalTarget,
 		Family:         plan.family,
-		Protocol:       model.ProtocolICMP,
+		Protocol:       plan.protocol,
+		Port:           clonePort(plan.port),
 		MaxHops:        plan.maxHops,
 		Queries:        plan.queries,
 		TimeoutMS:      plan.timeoutMS,
@@ -243,6 +244,8 @@ func (m *Manager) CreateJob(ctx context.Context, principal *Principal, clientIP 
 type createPlan struct {
 	target         netip.Addr
 	family         model.IPFamily
+	protocol       model.Protocol
+	port           *int
 	nodeIDs        []string
 	originalTarget string
 	maxHops        int
@@ -255,8 +258,19 @@ func (m *Manager) validateCreateJob(req *model.CreateJobRequest) (*createPlan, *
 		return nil, model.NewError(model.ErrInvalidRequest, "request body is required")
 	}
 	limits := m.cfg.Limits
-	if req.Protocol != model.ProtocolICMP {
-		return nil, model.NewError(model.ErrInvalidRequest, "protocol must be icmp")
+	protocol := req.Protocol
+	if !protocol.Valid() {
+		return nil, model.NewError(model.ErrInvalidRequest, "invalid protocol")
+	}
+	if !m.cfg.IsProtocolAllowed(protocol) {
+		return nil, model.NewError(model.ErrInvalidRequest, fmt.Sprintf("protocol %q is not enabled", protocol))
+	}
+	if err := model.ValidatePortForProtocol(protocol, req.Port); err != nil {
+		var apiErr *model.APIError
+		if errors.As(err, &apiErr) {
+			return nil, apiErr
+		}
+		return nil, model.NewError(model.ErrInvalidRequest, "invalid port")
 	}
 	if req.MaxHops < model.MinMaxHops || req.MaxHops > limits.MaxHops {
 		return nil, model.NewError(model.ErrInvalidRequest, fmt.Sprintf("max_hops must be between %d and %d", model.MinMaxHops, limits.MaxHops))
@@ -308,12 +322,24 @@ func (m *Manager) validateCreateJob(req *model.CreateJobRequest) (*createPlan, *
 	return &createPlan{
 		target:         target,
 		family:         model.FamilyOf(target),
+		protocol:       protocol,
+		port:           clonePort(req.Port),
 		nodeIDs:        nodeIDs,
 		originalTarget: validated,
 		maxHops:        req.MaxHops,
 		queries:        req.Queries,
 		timeoutMS:      req.TimeoutMS,
 	}, nil
+}
+
+// clonePort copies an optional destination port so job snapshots never alias a
+// caller-owned pointer.
+func clonePort(port *int) *int {
+	if port == nil {
+		return nil
+	}
+	value := *port
+	return &value
 }
 
 func safeCreatedBy(principal *Principal) string {
@@ -474,6 +500,7 @@ func (m *Manager) runNode(ctx context.Context, st *jobState, nodeID string) {
 		TargetIP:      job.TargetIP,
 		Family:        job.Family,
 		Protocol:      job.Protocol,
+		Port:          clonePort(job.Port),
 		MaxHops:       job.MaxHops,
 		Queries:       job.Queries,
 		TimeoutMS:     job.TimeoutMS,

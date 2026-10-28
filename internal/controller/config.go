@@ -69,9 +69,10 @@ type Config struct {
 	LogLevel       string         `json:"log_level"`
 
 	// Derived, unexported state populated by LoadConfig.
-	publicOrigin  *url.URL
-	trustedPrefix []netip.Prefix
-	targetPolicy  ipguard.Policy
+	publicOrigin     *url.URL
+	trustedPrefix    []netip.Prefix
+	targetPolicy     ipguard.Policy
+	allowedProtocols []model.Protocol
 }
 
 // SecurityConfig contains administrator-controlled target policy extensions.
@@ -143,6 +144,10 @@ type LimitsConfig struct {
 	MaxConcurrentTraces  int `json:"max_concurrent_traces"`
 	MaxResolvesPerMinute int `json:"max_resolves_per_minute"`
 	MaxRawResultBytes    int `json:"max_raw_result_bytes"`
+	// AllowedProtocols is the Controller-side protocol allowlist. The default
+	// is all MVP protocols (icmp, tcp, udp). Duplicates and unknown names are
+	// rejected at startup.
+	AllowedProtocols []string `json:"allowed_protocols"`
 	// MaxHistoryJobs is accepted here as an alias of database.max_history_jobs
 	// for convenience; when both are set they must agree.
 	MaxHistoryJobs int `json:"max_history_jobs"`
@@ -558,6 +563,21 @@ func (c *Config) finalizeLimits() error {
 	if l.MaxRawResultBytes < 0 || l.MaxRawResultBytes > 16<<20 {
 		return fmt.Errorf("config: limits.max_raw_result_bytes must be between 0 and 16777216")
 	}
+	if l.AllowedProtocols == nil {
+		// Absent means "all MVP protocols"; an explicitly empty list is a
+		// configuration error surfaced by ParseProtocolList.
+		l.AllowedProtocols = []string{
+			string(model.ProtocolICMP),
+			string(model.ProtocolTCP),
+			string(model.ProtocolUDP),
+		}
+	}
+	protocols, err := model.ParseProtocolList(l.AllowedProtocols)
+	if err != nil {
+		return fmt.Errorf("config: limits.allowed_protocols: %v", err)
+	}
+	c.allowedProtocols = protocols
+	l.AllowedProtocols = model.ProtocolNames(protocols)
 	return nil
 }
 
@@ -834,7 +854,25 @@ func (c *Config) SessionLimits() model.ControllerLimits {
 		MaxNodesPerJob: c.Limits.MaxNodesPerJob,
 		MaxAddresses:   c.DNS.MaxAddresses,
 		MaxHistoryJobs: c.Database.MaxHistoryJobs,
+		Protocols:      model.ProtocolNames(c.allowedProtocols),
 	}
+}
+
+// AllowedProtocols returns the validated Controller protocol allowlist.
+func (c *Config) AllowedProtocols() []model.Protocol {
+	out := make([]model.Protocol, len(c.allowedProtocols))
+	copy(out, c.allowedProtocols)
+	return out
+}
+
+// IsProtocolAllowed reports whether p is enabled by the Controller config.
+func (c *Config) IsProtocolAllowed(p model.Protocol) bool {
+	for _, allowed := range c.allowedProtocols {
+		if allowed == p {
+			return true
+		}
+	}
+	return false
 }
 
 // Warnings returns static, non-sensitive warnings the UI shows in the session

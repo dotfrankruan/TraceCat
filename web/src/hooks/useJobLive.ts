@@ -70,6 +70,7 @@ export function useJobLive(job: Job | null, callbacks: JobLiveCallbacks): JobLiv
     let pollInFlight = false
     let reportedTransportError = false
     let opened = false
+    let terminalSnapshotReceived = false
 
     const clearTimers = (): void => {
       if (pollTimer !== null) {
@@ -145,10 +146,19 @@ export function useJobLive(job: Job | null, callbacks: JobLiveCallbacks): JobLiv
       source.addEventListener('job', (event) => {
         if (disposed) return
         const snapshot = parseSnapshot((event as MessageEvent<string>).data)
-        if (snapshot) callbacksRef.current.onJob(snapshot)
+        if (!snapshot) return
+        if (isTerminalJob(snapshot.status)) {
+          // The server closes the stream after the terminal snapshot; that
+          // normal close must not be reported as a transport failure.
+          terminalSnapshotReceived = true
+          source?.close()
+          source = null
+          clearTimers()
+        }
+        callbacksRef.current.onJob(snapshot)
       })
       source.onerror = () => {
-        if (disposed) return
+        if (disposed || terminalSnapshotReceived) return
         reportTransportError()
         startPolling()
       }

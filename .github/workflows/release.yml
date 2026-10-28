@@ -89,7 +89,8 @@ jobs:
               -C "stage/agent-${arch}" .
           done
 
-          rm -f dist/tracecat-controller-linux-* dist/tracecat-agent-linux-*
+          # Keep the raw binaries in dist/; only tarballs and checksums are
+          # attached to the release below.
           (cd dist && sha256sum tracecat-*.tar.gz > checksums.txt)
           echo "--- release assets ---"
           ls -lh dist

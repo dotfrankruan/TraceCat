@@ -100,7 +100,12 @@ log()  { printf '[tracecat] %s\n' "$*"; }
 warn() { printf '[tracecat] WARNING: %s\n' "$*" >&2; }
 die()  { printf '[tracecat] ERROR: %s\n' "$*" >&2; exit 1; }
 
-cleanup() { [[ -n "$TMPDIR" && -d "$TMPDIR" ]] && rm -rf "$TMPDIR"; }
+cleanup() {
+  if [[ -n "${TMPDIR:-}" && -d "${TMPDIR:-}" ]]; then
+    rm -rf "$TMPDIR"
+  fi
+  return 0
+}
 trap cleanup EXIT
 
 need_root() { [[ "${EUID}" -eq 0 ]] || die "run as root (sudo)"; }
@@ -137,12 +142,12 @@ add_agent_spec() {
   IFS=',' read -r id url token_env name location provider <<<"$spec"
   [[ -n "$id" && -n "$url" && -n "$token_env" ]] || die "--agent requires id,url,token_env (got: $spec)"
   [[ "$id" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || die "invalid agent id: $id"
-  [[ "$url" =~ ^https?://[A-Za-z0-9._:\-\[\]/]+/?$ ]] || die "invalid agent url: $url"
+  [[ "$url" =~ ^https?://[][A-Za-z0-9._:/-]+/?$ ]] || die "invalid agent url: $url"
   [[ "$token_env" =~ ^[A-Z][A-Z0-9_]{0,127}$ ]] || die "invalid token_env name: $token_env"
   name="${name:-$id}"
   valid_simple "$name" "agent name"
-  valid_simple "${location:-}" "agent location"
-  valid_simple "${provider:-}" "agent provider"
+  [[ -z "${location:-}" ]] || valid_simple "$location" "agent location"
+  [[ -z "${provider:-}" ]] || valid_simple "$provider" "agent provider"
   AGENT_SPECS+=("$id|$url|$token_env|$name|${location:-}|${provider:-}")
 }
 
@@ -278,7 +283,7 @@ backup_existing() {
 
 write_agent_config() {
   [[ -n "$AGENT_LISTEN" ]] || die "agent --listen is required (e.g. 10.0.0.5:8443)"
-  [[ "$AGENT_LISTEN" =~ ^[0-9A-Fa-f:.]+:[0-9]{1,5}$ ]] || die "invalid --listen (expected ip:port): $AGENT_LISTEN"
+  [[ "$AGENT_LISTEN" =~ ^(\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f:.]+):[0-9]{1,5}$ ]] || die "invalid --listen (expected ip:port): $AGENT_LISTEN"
 
   NEXTTRACE_PATH="${NEXTTRACE_PATH:-$(command -v nexttrace || true)}"
   [[ -n "$NEXTTRACE_PATH" ]] || die "NextTrace not found; install it or pass --nexttrace /path/to/nexttrace"
@@ -371,7 +376,7 @@ write_controller_config() {
   [[ "$AUTH_MODE" == "cloudflare" || "$AUTH_MODE" == "local" || "$AUTH_MODE" == "dev" ]] \
     || die "--auth must be cloudflare, local or dev"
 
-  [[ "$CONTROLLER_LISTEN" =~ ^[0-9A-Fa-f:.]+:[0-9]{1,5}$ ]] || die "invalid --listen: $CONTROLLER_LISTEN"
+  [[ "$CONTROLLER_LISTEN" =~ ^(\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f:.]+):[0-9]{1,5}$ ]] || die "invalid --listen: $CONTROLLER_LISTEN"
   if [[ "$AUTH_MODE" == "dev" ]]; then
     [[ "$CONTROLLER_LISTEN" =~ ^(127\.0\.0\.1|\[::1\]): ]] || die "auth.mode=dev requires a loopback --listen"
     PUBLIC_ORIGIN="${PUBLIC_ORIGIN:-http://$CONTROLLER_LISTEN}"
@@ -586,4 +591,6 @@ main() {
   log "done. Docs: https://github.com/$REPO/blob/main/docs/DEPLOYMENT.md"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

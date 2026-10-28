@@ -30,6 +30,9 @@ jobs:
           if [ -n "$unformatted" ]; then
             echo "These files are not gofmt'd:"; echo "$unformatted"; exit 1
           fi
+      - name: installer argument validation
+        run: bash deploy/install_test.sh
+
       - name: go vet
         run: go vet ./...
       - name: tests (race detector)

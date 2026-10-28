@@ -69,7 +69,10 @@ embedded, so `make build` and `go build` need no Node.js.
 # 1. Build both binaries (dashboard assets are committed; no Node needed)
 make build
 
-# 2. Run an Agent against a dev config (loopback for local testing)
+# 2. Run an Agent against a dev config (loopback for local testing).
+#    If NextTrace is installed elsewhere, set the absolute path in
+#    configs/agent.dev.json ("nexttrace.binary"); hostnames/PATH lookup are
+#    intentionally not accepted.
 TRACECAT_AGENT_TOKEN=local-dev-token-please-change ./bin/tracecat-agent -config configs/agent.dev.json
 
 # 3. Run the Controller in explicit loopback-only dev mode
@@ -77,6 +80,10 @@ TRACECAT_AGENT_TOKEN=local-dev-token-please-change ./bin/tracecat-agent -config 
 
 # 4. Open http://127.0.0.1:8080
 ```
+
+`configs/controller.dev.json` expects the Agent on `127.0.0.1:9481` with the
+`TRACECAT_AGENT_TOKEN` value above. To try the comparison view, run a second
+Agent on another port and add it to the Controller's `agents` list.
 
 After changing dashboard sources, rebuild the committed assets with
 `make ui` (requires Node 22+/pnpm); deployed servers never run Node.

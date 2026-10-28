@@ -81,6 +81,20 @@ done
 
 bash -n "$ROOT/deploy/install.sh" || { echo "FAIL: install.sh syntax"; fail=1; }
 
+# No trailing `[[ ... ]] && log ...` idiom that makes a successful install
+# function return 1 under `set -e` when the condition is false.
+if grep -nE '^[[:space:]]*\[\[ .* \]\] && (log|warn|echo)' "$ROOT/deploy/install.sh" >/dev/null; then
+  echo "FAIL: installer has a trailing conditional-log idiom (exit-status hazard)"; fail=1
+fi
+
+# --help must exit 0; an unknown option must exit non-zero.
+if bash "$ROOT/deploy/install.sh" --help >/dev/null 2>&1; then :; else
+  echo "FAIL: install.sh --help did not exit 0"; fail=1
+fi
+if bash "$ROOT/deploy/install.sh" agent --not-a-real-flag >/dev/null 2>&1; then
+  echo "FAIL: install.sh accepted an unknown option"; fail=1
+fi
+
 if [[ "$fail" -ne 0 ]]; then
   echo "installer validation: FAILED"
   exit 1

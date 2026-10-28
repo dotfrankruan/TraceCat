@@ -370,6 +370,7 @@ EOF
     systemctl daemon-reload
     log "installed; start later with: systemctl enable --now tracecat-agent"
   fi
+  return 0
 }
 
 write_controller_config() {
@@ -570,16 +571,21 @@ EOF
     systemctl enable --now tracecat-controller
     log "tracecat-controller enabled and started"
     log "listening on $CONTROLLER_LISTEN (public origin $PUBLIC_ORIGIN)"
-    [[ "$AUTH_MODE" == "cloudflare" ]] && log "put the Access JWT verification settings in $config and the csrf secret in $envfile"
+    if [[ "$AUTH_MODE" == "cloudflare" ]]; then
+      log "put the Access JWT verification settings in $config and the csrf secret in $envfile"
+    fi
   else
     systemctl daemon-reload
     log "installed; start later with: systemctl enable --now tracecat-controller"
   fi
+  return 0
 }
 
 main() {
-  need_root
+  # Argument parsing (including --help) works without root; privileged actions
+  # start only after validation succeeds.
   parse_args "$@"
+  need_root
   for cmd in install systemctl tar awk sed grep; do need_cmd "$cmd"; done
   prepare_tree
   create_user_and_dirs

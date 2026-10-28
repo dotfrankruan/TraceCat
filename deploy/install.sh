@@ -259,7 +259,12 @@ create_user_and_dirs() {
 install_common() {
   install -m 0755 "$TREE/bin/tracecat-$COMPONENT" "$BIN_DIR/tracecat-$COMPONENT"
   log "installed $BIN_DIR/tracecat-$COMPONENT"
-  install -m 0644 "$TREE/deploy/systemd/tracecat-$COMPONENT.service" /etc/systemd/system/
+  local unit="/etc/systemd/system/tracecat-$COMPONENT.service"
+  install -m 0644 "$TREE/deploy/systemd/tracecat-$COMPONENT.service" "$unit"
+  if [[ "$BIN_DIR" != "/usr/local/bin" ]]; then
+    sed -i "s#/usr/local/bin/tracecat-$COMPONENT#$BIN_DIR/tracecat-$COMPONENT#" "$unit"
+    log "patched unit ExecStart for --bin-dir $BIN_DIR"
+  fi
 }
 
 backup_existing() {
@@ -289,9 +294,12 @@ write_agent_config() {
     backup_existing "$config"
     local public="false"
     [[ "$ALLOW_PUBLIC_BIND" -eq 1 ]] && public="true"
+    local node_id
+    node_id="$(hostname 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | cut -c1-32 | sed 's/^-*//; s/-*$//')"
+    [[ -n "$node_id" ]] || node_id="tracecat-agent"
     cat >"$config" <<EOF
 {
-  "node_id": "$(hostname | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | cut -c1-32 | sed 's/-*$//')",
+  "node_id": "$node_id",
   "name": "$(hostname)",
   "listen": "$AGENT_LISTEN",
   "auth": {

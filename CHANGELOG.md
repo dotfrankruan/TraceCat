@@ -4,17 +4,37 @@ All notable changes to TraceCat are documented here. The project follows
 [Semantic Versioning](https://semver.org/) and the wire contract carries its own
 schema versions (`tracecat.agent.v1`, `tracecat.controller.v1`).
 
-## [Unreleased]
+## [0.1.1] — 2026-10-28
 
 ### Added
 
-- Optional TCP and UDP traceroute in addition to ICMP. The protocol is a fixed
+- **Optional TCP and UDP traceroute** in addition to ICMP. The protocol is a fixed
   enum (`icmp`/`tcp`/`udp`) mapped to capability-detected NextTrace flags, and
   TCP/UDP probes require an explicit destination port bounded to `1..65535`
   (numeric only). Both Controller and Agent enforce their own
   `allowed_protocols` allowlist; the dashboard exposes a protocol selector and
   validated port input, and protocol/port are stored, displayed and exported
   with each job. MTR sessions remain unsupported.
+- **Per-Agent network interface selection.** Agents enumerate eligible
+  interfaces (Up, non-loopback, usable address; container/bridge/virtual names
+  excluded by default, with admin `interfaces.exclude`/`interfaces.include`),
+  advertise them in `/v1/health`, and accept a per-node `node_interfaces`
+  selection that maps to a fixed NextTrace `-D` argument. The dashboard exposes
+  an Automatic/interface selector for each selected Agent. Auto means OS
+  routing.
+- **Generic private bind policy.** The Agent no longer assumes Tailscale: any
+  explicitly configured, assigned non-public address is accepted (overlay, VPC,
+  RFC1918, CGNAT, ULA, loopback); public binds require an explicit
+  `security.allow_public_bind` opt-in. Tailscale is documented as one option,
+  with no tag/API dependency.
+- **Deployment automation.** GitHub Actions release workflow builds
+  linux/amd64 + linux/arm64 Controller/Agent tarballs with checksums and
+  publishes them to the release; `deploy/install.sh` installs or upgrades a
+  host end to end (verified download, systemd units, service user, generated
+  configs/secrets, token handling). A local `scripts/build-release.sh`
+  reproduces the packaging for offline/CI testing.
+- **Quick Start guide** (`QUICKSTART.md`) covering the local stack, protocol/port
+  selection, interface selection and troubleshooting.
 
 ## [0.1.0] — 2026-10-28
 
@@ -75,6 +95,13 @@ external NextTrace CLI, with an embedded React dashboard.
   explicitly approved at both layers.
 - Controller rate-limit responses now include `Retry-After`, and local login
   enforces `Content-Type: application/json` (`415`) like the Agent API.
+
+### Changed
+
+- Agent configuration schema: removed `security.require_tailscale_bind` and
+  `security.allow_non_tailscale_bind`; added `security.allow_public_bind` and
+  top-level `interfaces.{exclude,include}`. Histories with old configs must be
+  updated (strict JSON rejects unknown keys).
 
 ### Known limitations
 

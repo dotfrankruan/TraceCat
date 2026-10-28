@@ -43,6 +43,9 @@ shell, no user-controlled executable or flags, and no generic command API.
 - **ICMP, TCP and UDP probes.** Protocols are a fixed enum mapped to
   capability-detected NextTrace flags; TCP/UDP require an explicit destination
   port bounded to 1..65535, and each layer enforces its own protocol allowlist.
+- **Interface selection.** Agents advertise eligible network interfaces
+  (loopback and container/bridge devices excluded) so each node can trace from
+  a chosen source interface; automatic OS routing remains the default.
 - **Honest results.** Per-node Pending/Running/Completed/Failed/Timed out/
   Cancelled, bounded history, raw JSON export, and a UI that never claims an
   intermediate timeout means a broken route.

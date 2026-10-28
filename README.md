@@ -102,7 +102,10 @@ verification report.
 - Go 1.27.x toolchain; NextTrace v1.7.1 (macOS) and v1.7.3 (Debian 13) verified
   for flag detection and JSON parsing; the parser tolerates known schema
   variations.
-- Deployed and exercised on Debian 13 with systemd 257 and Tailscale 1.104.
+- Deployed and independently verified on Debian 13 with systemd 257 and
+  Tailscale 1.104: 325 PASS / 0 FAIL / 2 environment-N/A SKIPs, including real
+  ICMP traces from two tailnet Agents, local-auth/CSRF checks and a
+  zero-violation-CSP browser run (`docs/VERIFICATION.md`).
 - Tests do not require public traceroute targets, real GeoIP services, or
   internet access.
 

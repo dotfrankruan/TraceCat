@@ -65,6 +65,11 @@ func writeAPIError(w http.ResponseWriter, status int, apiErr *model.APIError) {
 	if apiErr == nil {
 		apiErr = model.NewError(model.ErrInternal, "internal error")
 	}
+	if status == http.StatusTooManyRequests {
+		// Rate limits are short fixed windows; a conservative hint is enough for
+		// well-behaved clients and matches the Agent's behaviour.
+		w.Header().Set("Retry-After", "1")
+	}
 	writeJSON(w, status, model.ErrorResponse{Error: apiErr})
 }
 

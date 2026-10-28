@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -186,6 +187,10 @@ func (a *API) handleSession(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if a.cfg.Auth.Mode != AuthModeLocal {
 		writeError(w, model.ErrNotFound, "not found")
+		return
+	}
+	if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mediaType != "application/json" {
+		writeAPIError(w, http.StatusUnsupportedMediaType, model.NewError(model.ErrInvalidRequest, "Content-Type must be application/json"))
 		return
 	}
 	var req model.LoginRequest

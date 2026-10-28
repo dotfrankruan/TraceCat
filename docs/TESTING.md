@@ -93,7 +93,10 @@ real NextTrace v1.7.1) was exercised end to end:
   mobile layout, with no CSP violations, no console errors, and no spurious
   transport warnings on normal SSE completion.
 
-Linux/systemd/Tailscale specifics (unprivileged Agent bound only to its tailnet
-address, bearer auth, real ICMP under `CAP_NET_RAW`, adversarial HTTP matrix,
-startup refusals, restart/cancellation) are recorded as PASS/FAIL checks in
-`docs/VERIFICATION.md`.
+An independent verifier reproduced the full matrix on a real Debian 13 host
+with systemd and Tailscale, using the shipped units/config formats and
+independently checking trace responses:
+**325 PASS / 0 FAIL / 2 environment-N/A SKIPs** (Agent 126, Controller dev 125,
+local auth 57, headless-browser 17/17), plus desktop/mobile screenshots and a
+zero-violation CSP/console report. See `docs/VERIFICATION.md` for every check,
+the three defects it found (all fixed and re-verified) and residual risks.

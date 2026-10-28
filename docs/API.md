@@ -30,7 +30,8 @@ Shared limits (also in `internal/model/model.go`):
 All timestamps on the wire are RFC 3339 with nanosecond precision in UTC, e.g.
 `2025-01-02T03:04:05.123456789Z`. All JSON responses use
 `Content-Type: application/json` and `Cache-Control: no-store` (except static
-frontend assets). Error responses always use the envelope:
+frontend assets). `429` responses include a `Retry-After` hint. Error responses
+always use the envelope:
 
 ```json
 { "error": { "code": "target_rejected", "message": "destination 10.0.0.1 rejected: private_address" } }
@@ -287,7 +288,8 @@ The frontend must render limits from this response, not hardcode them.
 
 Local mode only (`404` in cloudflare/dev mode).
 
-Login request: `{"password":"…"}` (body <= 4 KiB). Success: `200` with the
+Login request: `{"password":"…"}` with `Content-Type: application/json` (body
+<= 4 KiB; other content types get `415`). Success: `200` with the
 session object above and a `Set-Cookie` for `tracecat_session`. Failure: `401
 unauthorized`; repeated failures: `429 rate_limited`.
 

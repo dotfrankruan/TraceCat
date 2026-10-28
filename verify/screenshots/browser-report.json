@@ -1,0 +1,101 @@
+{
+  "url": "http://127.0.0.1:18090/",
+  "generated_at": "2026-10-28T14:23:19.955Z",
+  "checks": [
+    {
+      "name": "two_agents_rendered",
+      "ok": true,
+      "detail": "checkboxes=2"
+    },
+    {
+      "name": "agents_healthy_in_ui",
+      "ok": true,
+      "detail": "no degraded/unreachable text"
+    },
+    {
+      "name": "domain_returns_choices",
+      "ok": true,
+      "detail": "address radios=4"
+    },
+    {
+      "name": "domain_resolution_shown",
+      "ok": true,
+      "detail": "kind=Domain badge present"
+    },
+    {
+      "name": "explicit_address_selected",
+      "ok": true,
+      "detail": "selected=104.20.23.154"
+    },
+    {
+      "name": "agents_selected",
+      "ok": true,
+      "detail": "selection summary visible"
+    },
+    {
+      "name": "hop_table_rendered",
+      "ok": true,
+      "detail": "rows=30"
+    },
+    {
+      "name": "both_nodes_in_results",
+      "ok": true,
+      "detail": "both node result cards visible"
+    },
+    {
+      "name": "job_completed_in_ui",
+      "ok": true,
+      "detail": "completed status, hop data present"
+    },
+    {
+      "name": "honest_no_reply_wording",
+      "ok": true,
+      "detail": "no-reply/reached wording present"
+    },
+    {
+      "name": "compare_view_rendered",
+      "ok": true,
+      "detail": "compare explanation visible"
+    },
+    {
+      "name": "compare_has_both_paths",
+      "ok": true,
+      "detail": "both paths in compare view"
+    },
+    {
+      "name": "mobile_no_horizontal_overflow",
+      "ok": true,
+      "detail": "scrollWidth=390 innerWidth=390"
+    },
+    {
+      "name": "zero_csp_violations",
+      "ok": true,
+      "detail": "0 violations"
+    },
+    {
+      "name": "zero_console_errors",
+      "ok": true,
+      "detail": "0 errors"
+    },
+    {
+      "name": "zero_page_exceptions",
+      "ok": true,
+      "detail": "0 exceptions"
+    },
+    {
+      "name": "assets_same_origin_only",
+      "ok": true,
+      "detail": "all local"
+    }
+  ],
+  "console_errors": [],
+  "csp_violations": [],
+  "page_exceptions": [],
+  "screenshots": [
+    "compare.png",
+    "dashboard.png",
+    "mobile.png",
+    "resolution.png",
+    "results.png"
+  ]
+}

@@ -252,6 +252,17 @@ One of `debug`, `info`, `warn`, `error` (default `info`). Logs are structured
 JSON on stderr and never contain tokens, password hashes, session cookies or
 Authorization headers. Request logs omit query strings and headers.
 
+### Authentication and restart notes
+
+- `auth.cloudflare.csrf_secret_env` (and the equivalent CSRF derivation in
+  `dev` mode) uses a random per-process secret when unset. Restarting the
+  Controller therefore invalidates outstanding CSRF tokens from an open tab in
+  those modes; reload the page. Set the env var for multi-replica deployments.
+- Local-mode CSRF tokens are stored with the server-side session in SQLite, so
+  they survive a restart for the lifetime of the session.
+- Login requests must use `Content-Type: application/json` (`415` otherwise).
+  Rate-limited responses (`429`) include `Retry-After: 1`.
+
 ## Operational notes
 
 - On startup, jobs left `pending`/`running` by a previous process are marked

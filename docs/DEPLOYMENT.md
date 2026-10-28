@@ -234,7 +234,11 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer wrong' \
 ## 5. Operations
 
 - **Logs:** `journalctl -u tracecat-controller` / `-u tracecat-agent`. Tokens and
-  request bodies are never logged.
+  request bodies are never logged. Repeated crash-restart loops are rate-limited
+  by systemd's default start limit (`StartLimitBurst=5` per 10 s); investigate
+  with `journalctl` and `systemctl reset-failed` before restarting manually.
+- **Version:** release binaries built with `make build` embed the git
+  version/commit/build date; ad-hoc `go build` binaries report `dev`.
 - **Database:** `/var/lib/tracecat/controller.db` (WAL enabled). History is
   trimmed to `database.max_history_jobs`; back up by stopping the service and
   copying the DB + `-wal`/`-shm`, or use SQLite's online backup.

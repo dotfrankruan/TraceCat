@@ -1,0 +1,1189 @@
+# TraceCat — independent deployment and security verification
+
+This report is written by an **independent verifier** working on the shared
+checkout but not on the production code. Every result below was reproduced from
+a real Debian host with the repository's own binaries, service units and
+configuration formats; implementer claims were treated as hypotheses until they
+were observed. The verifier did not modify production Go/TypeScript/config
+files, `go.mod`/`go.sum` or git state. The verification harness and captured
+artifacts live under `verify/`.
+
+| Phase | Scope | Status |
+| --- | --- | --- |
+| 1 | Agent: unprivileged systemd deployment on the tailnet, real NextTrace execution, adversarial HTTP matrix | **PASS** (126 PASS / 0 FAIL / 1 informational SKIP) |
+| 2 | Controller + dashboard end-to-end over an SSH tunnel: DNS, multi-node jobs, SSE, export, history, cancellation, restart reconciliation, allowlist, local auth/CSRF/sessions, headless-Chrome screenshots | **PASS** (125 + 57 + 17 PASS / 0 + 0 + 0 FAIL, 1 N/A) |
+| **Total** | | **325 PASS / 0 FAIL / 2 SKIP** |
+
+## 0. Environment and artifacts
+
+| Item | Value |
+| --- | --- |
+| Final verified commit | `4e3aa596b2d3e0fe304007cc550d3885adec7c89` (`4e3aa59` — NextTrace top-level `Hostname` reverse-DNS fix; parent `6d1644d` added the Controller target allowlist and restart reconciliation). Repository HEAD when this report was written is `551f15c357320785f8127a2839d8803943c8265a` (docs-only changelog/link commit; `git diff 4e3aa59..HEAD -- '*.go' '*.service' '*.json'` is empty), so the verified binaries correspond exactly to the final production code. |
+| Working tree | tracked production files clean: `git status --porcelain` lists only the verifier's new `docs/VERIFICATION.md` and `verify/` |
+| Verified binaries | both cross-compiled from `4e3aa59` with `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath`: agent `sha256 f0a277598950d731…`, controller `sha256 159c3e4b61d6da9b…` |
+| Final runs | Agent matrix 2026-10-28T14:18:41Z; Controller matrix 2026-10-28T14:20:42Z; local-auth 2026-10-28T14:21:07Z; browser proof 2026-10-28T14:23:19Z |
+| Test host | `root@124.222.154.86` — Debian 13, kernel `6.12.95+deb13-amd64`, systemd `257.13-1~deb13u1`, Tailscale `1.104.4` |
+| Tailnet addresses | IPv4 `100.81.98.125`, IPv6 `fd7a:115c:a1e0::4d2f:627e` |
+| NextTrace | `v1.7.3 2026-08-23T16:13:15Z 40ac803`, `sha256 aa75440fcdee46c1…` |
+| Agent services | `tracecat-agent` → node `debian-test-1`, listen `100.81.98.125:8443`; `tracecat-agent-b` → node `debian-test-2`, listen `100.81.98.125:8444` (distinct token) |
+| Controller services | `tracecat-controller` → dev auth, `127.0.0.1:8080`, `public_origin http://127.0.0.1:18090`; `tracecat-controller-local` → local auth, `127.0.0.1:8081` (independent test instance) |
+| Database | `/var/lib/tracecat/controller.db` and `controller-local.db`, `0600 tracecat`, SQLite WAL |
+| Browser | headless Google Chrome 156 on macOS arm64, driven over the DevTools Protocol through `ssh -N -L 18090:127.0.0.1:8080` |
+| Harness | `verify/setup-testhost-agent.sh`, `verify/setup-testhost-fullstack.sh`, `verify/agent-remote-verify.sh`, `verify/controller-remote-verify.sh`, `verify/controller-localauth-verify.sh`, `verify/check_trace_response.py`, `verify/e2e/drive.mjs`; screenshots in `verify/screenshots/`, trace samples in `verify/artifacts/` |
+
+Note on the tunnel port: an unrelated local Controller already occupied
+`127.0.0.1:18080` on the verification Mac, so the tunnel and the Controller's
+`public_origin` use `18090` instead (same mechanism; no unrelated process was
+disturbed). This is a test-environment detail only.
+
+Topology:
+
+```text
+macOS (headless Chrome + CDP)                 Debian test host (root@124.222.154.86)
+                                                ┌──────────────────────────────────────────────┐
+  ssh -N -L 18090:127.0.0.1:8080 ─────────────► │ tracecat-controller (uid tracecat)           │
+  http://127.0.0.1:18090 (browser origin)       │   dev auth, 127.0.0.1:8080, public_origin     │
+                                                │   http://127.0.0.1:18090, SQLite history     │
+                                                │      │ HTTP over the tailnet                 │
+                                                │      ├─► tracecat-agent   A  100.81.98.125:8443 │
+                                                │      └─► tracecat-agent-b B  100.81.98.125:8444 │
+                                                │             └─ nexttrace (CAP_NET_RAW, own PG) │
+                                                │ tracecat-controller-local (local auth :8081) │
+                                                └──────────────────────────────────────────────┘
+```
+
+## 1. Verdict
+
+Both phases are **PASS**. Totals across the three suites and the browser proof:
+**325 PASS, 0 FAIL, 2 SKIP**. Three
+blocking defects were found during Phase 1, reported with minimal
+reproductions, fixed upstream and independently re-verified; no blocking defect
+was found in Phase 2.
+
+Phase 1 (Agent):
+
+- binds only the configured Tailscale address — no wildcard, no public
+  listener, and fails closed on wildcard/missing/non-Tailscale addresses;
+- the bearer token is required for every request, compared in constant time,
+  never echoed, logged or returned; the secret file is `0600 root:root`;
+- the unprivileged `nexttrace` child really has `CAP_NET_RAW`
+  (`CapEff=0x2000`), the exact fixed argv, a minimal environment and its own
+  process group — real ICMP traces to IPv4 and IPv6 targets complete and are
+  parsed into hops, with ASN/geo/PTR metadata and no banner/ANSI/HTML leakage;
+- shell/argument/SSRF injection, IPv4-mapped IPv6, zoned addresses, malformed
+  and oversized JSON, wrong schema/node/family/limits, oversized bodies, wrong
+  `Content-Type`, burst rate limits and concurrency limits are all rejected as
+  specified; no child process ran and no file was created for rejected targets;
+- cancellation and graceful shutdown reap the entire process group; the journal
+  contains no token, config path or binary path.
+
+Phase 2 (Controller + dashboard):
+
+- deployed from `4e3aa59` with the repository's systemd unit and embedded
+  dashboard; both tailnet Agents report `health: ok` with NextTrace v1.7.3;
+- central DNS resolution returns real A/AAAA answers (e.g. `example.com` → 2×IPv4
+  + 2×IPv6, explicit selection required) with the CDN/GeoDNS warning;
+- a real multi-node job runs on both Agents (`completed`, 14 hops each,
+  destination reached, `one.one.one.one` PTR surfaced through the new Hostname
+  fix), is streamed as bare SSE snapshots, exported with bounded raw results,
+  persisted across restarts and cancelled with both Agent process groups reaped;
+- startup reconciliation marks jobs interrupted by a crash as `failed` (no
+  stale `running` rows); the administrator allowlist is enforced (default deny,
+  `0.0.0.0/0` and malformed CIDRs refuse startup);
+- local auth mode: PBKDF2 login, `HttpOnly; SameSite=Strict` session cookie,
+  CSRF + Origin/`Sec-Fetch-Site` enforcement, logout revocation, hashed
+  sessions persisted in SQLite, per-client login/resolve/job rate limits;
+- dev mode is loopback-only and rejects forwarding headers (`403`), the
+  dashboard is served with a strict CSP and the other security headers, the
+  frontend bundle contains no tokens or node addresses, and the browser run
+  produced **zero CSP violations, zero console errors and zero uncaught
+  exceptions** (see §12.5).
+
+One caveat is environmental, not a defect: this provider filters some ICMP
+TTL-exceeded replies, so many probes are honestly reported as `no_reply`
+(see §9).
+
+## 2. Method and independence
+
+- Deployment was performed only with the verifier's own scripts
+  (`verify/setup-testhost-agent.sh`) using the repo unit and example config
+  layout. The Agent was built from the shared checkout; no local patches were
+  applied to production code at any point.
+- Verification was black-box: HTTP/curl, `ss`, `journalctl`, `/proc`, `systemd`
+  and `pgrep`, plus source review of the security-critical paths
+  (`internal/agent`, `internal/nexttrace`, `internal/ipguard`, `internal/model`).
+- `verify/check_trace_response.py` validates every trace response independently
+  (42 structural/sanitization/bounds checks per trace) instead of trusting the
+  Agent's self-reported status.
+- The deployed rate limit (`burst=10`, `60 req/min`) is intentionally low; the
+  harness restarts the service between request batches to avoid the rate limiter
+  masking functional assertions, and tests the burst limit deliberately in §G.
+  Restarting also demonstrates restart resilience.
+- Three defects were found and reported with minimal reproductions; the owning
+  engineer/Lead fixed them upstream and the verifier rebuilt, redeployed and
+  re-ran the full matrix.
+
+### Threats explicitly exercised
+
+| Threat | Exercised by |
+| --- | --- |
+| T1 remote code execution via destination | shell metacharacters, `$(id)`, backticks, flags, URL, port suffix |
+| T2 argument/option injection | exact live argv audit of the child (`/proc/pid/cmdline`) |
+| T3 SSRF/reconnaissance | private, CGNAT, link-local/metadata, loopback, multicast, documentation, unspecified, mapped, zoned |
+| T4 IPv4-mapped IPv6 bypass | `::ffff:127.0.0.1` |
+| T6 credential theft/impersonation | missing/wrong/scheme-wrong/prefix tokens, unknown path, journal/health leakage, child env |
+| T9 stored/reflected XSS from metadata | control/ANSI/HTML scan over real hop metadata (incl. Chinese ISP names) |
+| T10 DoS | 413 body cap, 415, 429 burst, 503 concurrency, 5 s header timeout, 16 KiB header cap, 4 MiB stdout cap |
+| T11 secret leakage | token/file perms, health body, journal grep, `/proc/<child>/environ` |
+| T12 orphaned children | cancellation, client disconnect, graceful shutdown, `pgrep` |
+
+## 3. Deployment under test
+
+Condensed from `verify/setup-testhost-agent.sh` (the script is the reproducible
+source of truth; rerun it as root on a host where the checkout is available and
+your ssh key is authorised):
+
+```bash
+# cross-compile on the Mac
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+  -o /tmp/tracecat-agent-linux-amd64 ./cmd/tracecat-agent
+
+# install on the host (see verify/setup-testhost-agent.sh for the full script)
+install -m 0755 tracecat-agent-linux-amd64 /usr/local/bin/tracecat-agent
+install -d -m 0755 /etc/tracecat
+install -m 0640 -o root -g tracecat agent.json /etc/tracecat/agent.json
+# token generated on the host and never printed:
+( umask 077; printf 'TRACECAT_AGENT_TOKEN=%s\n' \
+    "$(openssl rand -base64 48 | tr -d '\n')" > /etc/tracecat/agent.env )
+chmod 0600 /etc/tracecat/agent.env   # root:root
+install -m 0644 tracecat-agent.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now tracecat-agent
+```
+
+`/etc/tracecat/agent.json` as deployed (no secrets in the file):
+
+```json
+{
+  "node_id": "debian-test-1",
+  "name": "Debian test host (independent verification)",
+  "listen": "100.81.98.125:8443",
+  "auth": { "token_env": "TRACECAT_AGENT_TOKEN" },
+  "nexttrace": {
+    "binary": "/usr/local/bin/nexttrace",
+    "max_concurrent_traces": 4,
+    "probe_timeout_ms": 1000,
+    "max_execution_ms": 60000,
+    "max_stdout_bytes": 4194304,
+    "max_raw_bytes": 1048576,
+    "geo_provider": ""
+  },
+  "security": {
+    "allow_private_targets": false,
+    "allowed_cidrs": [],
+    "require_tailscale_bind": true,
+    "allow_non_tailscale_bind": false
+  },
+  "rate_limit": { "requests_per_minute": 60, "burst": 10, "max_concurrent_http": 16 },
+  "log_level": "info"
+}
+```
+
+Observed startup (journal, token/path-free):
+
+```text
+level=INFO msg="nexttrace detected" node_id=debian-test-1 nexttrace_version=v1.7.3 capabilities="[ipv4 ipv6 json max_hops queries timeout]"
+level=INFO msg="agent listening" node_id=debian-test-1 listen=100.81.98.125:8443 nexttrace_available=true
+```
+
+Listener (the only 8443 listener; the public interface is not reachable —
+`curl http://124.222.154.86:8443/...` returns no HTTP status):
+
+```text
+LISTEN 0 4096 100.81.98.125:8443 0.0.0.0:* users:(("tracecat-agent",pid=...,fd=3))
+```
+
+## 4. Defects found during verification (all fixed and re-verified)
+
+| ID | Severity | Component | Symptom | Root cause | Fix (upstream) | Re-verified |
+| --- | --- | --- | --- | --- | --- | --- |
+| D1 | P1 | `deploy/systemd/tracecat-agent.service` | Agent started `degraded`; every trace returned `nexttrace_unavailable` | `MemoryDenyWriteExecute=true` made real NextTrace v1.7.3 exit `SIGSEGV` (ExecMainStatus=11, code=killed) | `c1fbfde` removes W^X from the Agent unit (Controller keeps it) and documents why | Yes — live trace + 126-check matrix |
+| D2 | P1 | `internal/nexttrace/capabilities.go` | Agent `degraded`: "installed nexttrace does not support the flags TraceCat requires" | `helpFlagSet` truncated each help line at the first run of two spaces, i.e. exactly at the short/long alias separator in real pflag help (`-j  --json`), so `--json` was never detected | `c1fbfde` keeps scanning when the text after the gap is another flag; regression tests use real v1.7.3 help | Yes — health `status=ok`, capabilities include `json` |
+| D3 | P1 | `internal/nexttrace/parser.go` | Real traces returned HTTP 200 but `status=failed`, `error.code=parse_error` ("output is not valid JSON") | NextTrace v1.7.x writes a 514-byte, 3-line raw-socket privilege advisory to **stdout** before the JSON whenever it runs unprivileged, even with `--json` and even when `CAP_NET_RAW` is effective | `a2833e4` finds a complete valid JSON document within a bounded 16 KiB prefix (max 16 candidates); banner never stored/exported; truncated JSON still `parse_error` | Yes — real traces `completed`, raw result contains no banner |
+
+Minimal reproductions (kept for the record; all were run by the verifier before
+the fixes):
+
+```bash
+# D1 — SIGSEGV under W^X
+cat >/etc/systemd/system/tc-probe.service <<'UNIT'
+[Service]
+Type=oneshot
+User=tracecat
+NoNewPrivileges=true
+MemoryDenyWriteExecute=true
+ExecStart=/usr/local/bin/nexttrace --version
+UNIT
+systemctl start tc-probe.service
+systemctl show -p ExecMainStatus --value tc-probe.service   # 11
+journalctl -u tc-probe.service -o cat | grep -i segv        # status=11/SEGV
+
+# D2 — real help format (before fix)
+nexttrace --help | awk '{t=$0; sub(/^[ 	]+/,"",t); if (t ~ /^-/) print}' | grep -- '--json'
+#   -j  --json   Output trace results as JSON      <- two spaces, not a comma
+
+# D3 — advisory on stdout, JSON after it (before fix)
+sudo -u tracecat env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/var/lib/tracecat \
+  LANG=C LC_ALL=C NO_COLOR=1 /usr/local/bin/nexttrace -4 --json -q 1 -m 1 1.1.1.1 \
+  > /tmp/nt.out 2>/tmp/nt.err
+python3 - <<'PY'
+import json
+data = open('/tmp/nt.out','rb').read()
+print(data.find(b'{"Hops"'))        # 514: banner precedes the JSON
+print(len(data), open('/tmp/nt.err','rb').read())  # 724, b'' (stderr empty)
+PY
+```
+
+### Non-blocking observations
+
+- `nexttrace binary is not executable` was the reported error for a probe killed
+  by a signal (D1). Behaviour is safe but the diagnostic is imprecise; a
+  follow-up could distinguish signal exits from permission errors.
+- The host mounts `/tmp` with `nosuid`, so a `setcap` binary copied to `/tmp`
+  silently loses its file capability. Operators using the documented `setcap`
+  alternative must install NextTrace at its final path (e.g.
+  `/usr/local/bin/nexttrace`). Worth a sentence in the deployment docs.
+- The Agent binds only the IPv4 tailnet address (as configured); the host's
+  tailnet IPv6 ULA `fd7a:…` is not exposed. Acceptable, but a dual-stack
+  deployment needs a second `listen`/instance today.
+- The cross-compiled binary reports `version="dev"` because no `-ldflags` version
+  is injected by the ad-hoc build command. Release builds should set it;
+  harmless for verification.
+- Reverse DNS was initially missing because the parser ignored NextTrace's
+  top-level `Hostname` field (observed during Phase 1). Fixed in `4e3aa59`
+  and re-verified in Phase 2: the destination hop of `1.1.1.1` now carries
+  `ptr: one.one.one.one` end-to-end through both Agents.
+- Rate limits are in-memory per Agent and reset on restart (documented design).
+
+## 5. Verification matrix (Phase 1)
+
+Final run against the `4e3aa59` build: **126 PASS, 0 FAIL, 1 SKIP** (127 recorded checks; the SKIP is an informational network-capability probe, not a product check).
+Rows marked `real_trace_*_contract` each aggregate the independent wire-contract
+checks from `verify/check_trace_response.py`.
+
+#### A. deployment posture
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| A1 | `unit_enabled` | enabled | `enabled` | PASS |
+| A2 | `unit_active` | active | `active` | PASS |
+| A3 | `runs_as_unprivileged` | User=tracecat | `tracecat` | PASS |
+| A4 | `no_new_privileges` | yes | `yes` | PASS |
+| A5 | `ambient_cap_net_raw` | cap_net_raw | `cap_net_raw` | PASS |
+| A6 | `capability_bounding_set` | cap_net_raw | `cap_net_raw` | PASS |
+| A7 | `protect_system` | strict | `strict` | PASS |
+| A8 | `private_tmp` | yes | `yes` | PASS |
+| A9 | `memory_deny_write_execute` | disabled (nexttrace needs W+X or it SIGSEGVs) | `no` | PASS |
+| A10 | `binds_only_tailscale_ip` | single 100.81.98.125:8443 | `100.81.98.125:8443` | PASS |
+| A11 | `no_wildcard_bind` | no 0.0.0.0/:: listener | `100.81.98.125:8443` | PASS |
+| A12 | `not_reachable_on_public_ip` | no HTTP 200 on public IP | `code=000` | PASS |
+| A13 | `config_permissions` | 640 root:tracecat | `640 root:tracecat` | PASS |
+| A14 | `secret_file_permissions` | 600 root:root | `600 root:root` | PASS |
+| A15 | `token_entropy_length` | >=32 bytes | `len=64` | PASS |
+| A16 | `agent_process_user` | tracecat | `tracecat` | PASS |
+
+#### B. authentication
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| B1 | `auth_missing_token` | 401 | `401 unauthorized` | PASS |
+| B2 | `auth_challenge_header` | WWW-Authenticate: Bearer | `Bearer` | PASS |
+| B3 | `auth_wrong_token` | 401 | `401 unauthorized` | PASS |
+| B4 | `auth_wrong_scheme` | 401 | `401 unauthorized` | PASS |
+| B5 | `auth_empty_bearer` | 401 | `401 unauthorized` | PASS |
+| B6 | `auth_before_routing` | 401 on unknown path without token | `401` | PASS |
+| B7 | `health_with_token` | 200 | `200` | PASS |
+| B8 | `health_schema` | tracecat.agent.v1 | `tracecat.agent.v1` | PASS |
+| B9 | `health_status_ok` | ok (nexttrace usable) | `ok nexttrace.available=True err=` | PASS |
+| B10 | `health_node_id` | debian-test-1 | `debian-test-1` | PASS |
+| B11 | `health_limits` | max_timeout_ms=60000 max_concurrent=4 | `60000/4` | PASS |
+| B12 | `health_time_format` | RFC3339Nano | `ok` | PASS |
+| B13 | `health_no_secret_or_path_leak` | no token/path/env | `none` | PASS |
+| B14 | `security_headers` | application/json + nosniff + no-store | `Cache-Control: no-store;Content-Type: application/json;X-Content-Type-Options: nosniff` | PASS |
+
+#### C. HTTP method handling
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| C1 | `trace_get_method` | 405 | `405 Allow=POST` | PASS |
+| C2 | `health_post_method` | 405 | `405 Allow=GET` | PASS |
+| C3 | `trace_put_method` | 405 | `405 Allow=POST` | PASS |
+| C4 | `unauth_unaffected_by_method_check` | 401 first | `401` | PASS |
+
+#### D. strict JSON / schema / limits
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| D1 | `valid_request_reaches_trace` | 200 (terminal status inside) | `200 status=completed err=` | PASS |
+| D2 | `json_unknown_field` | 400 invalid_request | `400 invalid_request` | PASS |
+| D3 | `json_trailing_data` | 400 invalid_request | `400 invalid_request` | PASS |
+| D4 | `wrong_schema_version` | 400 unsupported_schema_version | `400 unsupported_schema_version` | PASS |
+| D5 | `bad_job_id` | 400 | `400 invalid_request` | PASS |
+| D6 | `wrong_node_id` | 403 forbidden | `403 forbidden` | PASS |
+| D7 | `bad_family` | 400 | `400 invalid_request` | PASS |
+| D8 | `bad_protocol` | 400 (tcp not in MVP) | `400 invalid_request` | PASS |
+| D9 | `max_hops_zero` | 400 | `400 invalid_request` | PASS |
+| D10 | `max_hops_above_global_max` | 400 | `400 invalid_request` | PASS |
+| D11 | `queries_zero` | 400 | `400 invalid_request` | PASS |
+| D12 | `queries_above_global_max` | 400 | `400 invalid_request` | PASS |
+| D13 | `timeout_below_min` | 400 | `400 invalid_request` | PASS |
+| D14 | `timeout_above_agent_max` | 400 (agent max 60000) | `400 invalid_request` | PASS |
+| D15 | `family_target_mismatch` | 400 | `400 invalid_request` | PASS |
+
+#### E. target rejection (injection / SSRF policy)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| E1 | `inject_reject[hostname]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E2 | `inject_reject[semicolon_cmd]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E3 | `inject_reject[dollar_paren]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E4 | `inject_reject[backticks]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E5 | `inject_reject[flag_help]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E6 | `inject_reject[flag_family]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E7 | `inject_reject[flag_output]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E8 | `inject_reject[bracketed_v6]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E9 | `inject_reject[zoned_v6]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E10 | `inject_reject[mapped_v6]` | 4xx target_rejected/invalid_request | `400 invalid_request` | PASS |
+| E11 | `inject_reject[private_10]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E12 | `inject_reject[private_172]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E13 | `inject_reject[private_192]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E14 | `inject_reject[metadata_linklocal]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E15 | `inject_reject[documentation_203]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E16 | `inject_reject[documentation_198]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E17 | `inject_reject[cgnat_100_64]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E18 | `inject_reject[unspecified]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E19 | `inject_reject[multicast]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E20 | `inject_reject[loopback_v6]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E21 | `inject_reject[documentation_v6]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E22 | `inject_reject[with_port]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E23 | `inject_reject[url]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E24 | `inject_reject[trailing_space]` | 4xx target_rejected/invalid_request | `422 target_rejected` | PASS |
+| E25 | `inject_reject[newline]` | 4xx target_rejected/invalid_request | `400 invalid_request` | PASS |
+| E26 | `no_injection_side_effect` | /tmp/tracecat-pwned absent | `absent` | PASS |
+| E27 | `no_child_ran_for_rejected_targets` | no nexttrace process | `none` | PASS |
+| E28 | `allowed_target_still_reaches_runner` | 200 | `200 status=completed` | PASS |
+
+#### F. content type and body size
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| F1 | `content_type_text_plain` | 415 | `415 invalid_request` | PASS |
+| F2 | `content_type_missing` | 415 | `415 invalid_request` | PASS |
+| F3 | `content_type_with_charset` | 200 | `200 status=completed` | PASS |
+| F4 | `body_over_64kib` | 413 payload_too_large | `413 payload_too_large size=71904` | PASS |
+| F5 | `empty_body` | 400 | `400 invalid_request` | PASS |
+
+#### G. rate limiting
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| G1 | `burst_rate_limit` | >=1x 429 among 16 rapid requests | `codes=200 200 200 200 200 200 200 200 200 200 429 429 429 429 429 429` | PASS |
+| G2 | `rate_limit_envelope` | 429 rate_limited | `429 rate_limited retry_after=1` | PASS |
+| G3 | `rate_limit_retry_after` | numeric seconds | `1` | PASS |
+
+#### H. platform caveat: ICMP reachability from this vantage point
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| H1 | `icmp_ttl_exceeded_available` | informational | `ping -t 1: 1 packets transmitted, 0 received, 100% packet loss, time 0ms` | SKIP (not applicable) |
+
+#### I. real traces and capability proof
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| I1 | `real_trace_ipv4_http` | 200 | `200` | PASS |
+| I2 | `real_trace_ipv4_contract` | all wire checks pass | `SUMMARY 44/44 checks passed` | PASS |
+| I3 | `real_trace_ipv4_detail` | >=20 sub-checks | `SUMMARY 44/44 checks passed` | PASS |
+| I4 | `real_trace_ipv6_http` | 200 | `200 status=completed` | PASS |
+| I5 | `real_trace_ipv6_contract` | all wire checks pass | `SUMMARY 43/43 checks passed` | PASS |
+| I6 | `cap_net_raw_effective` | CAP_NET_RAW set, uid tracecat | `uid=tracecat CapEff=0000000000002000 CapAmb=0000000000002000 net_raw=yes` | PASS |
+| I7 | `child_env_minimal` | no token/config/env leak | `leak=none keys=HOME,LANG,LC_ALL,NO_COLOR,PATH` | PASS |
+| I8 | `raw_socket_child_running` | nexttrace alive (no permission abort) | `pid=3614267` | PASS |
+| I9 | `cancellation_kills_process_group` | no nexttrace within 12s of client disconnect | `reaped` | PASS |
+| I10 | `cancellation_logged` | journal status=cancelled | `status=cancelled` | PASS |
+| I11 | `agent_survives_cancel` | active | `active` | PASS |
+| I12 | `concurrency_503` | 503 busy when 4 traces in flight | `503 busy children=4` | PASS |
+| I13 | `agent_recovers_after_load` | 200 health | `200` | PASS |
+
+#### J. startup refusal (fail closed, never wildcard)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| J1 | `startup_refuse[wildcard_v4]` | exit!=0 and mentions 'wildcard binds are refused' | `rc=1 error="listen: wildcard binds are refused; configure an explicit local address"` | PASS |
+| J2 | `startup_refuse[wildcard_v6]` | exit!=0 and mentions 'wildcard binds are refused' | `rc=1 error="listen: wildcard binds are refused; configure an explicit local address"` | PASS |
+| J3 | `startup_refuse[empty_host]` | exit!=0 and mentions 'wildcard binds are refused' | `rc=1 error="listen: wildcard binds are refused; configure an explicit local address"` | PASS |
+| J4 | `startup_refuse[hostname]` | exit!=0 and mentions 'numeric IP address' | `rc=1 error="listen: listen host must be a numeric IP address (hostnames are not accepted)"` | PASS |
+| J5 | `startup_refuse[unassigned_ip]` | exit!=0 and mentions 'is not assigned' | `rc=1 error="listen address 100.81.98.126 is not assigned to any local interface"` | PASS |
+| J6 | `startup_refuse[non_tailscale_private]` | exit!=0 and mentions 'not a Tailscale address' | `rc=1 error="listen address 10.0.0.12 is not a Tailscale address; require_tailscale_bind is enabled"` | PASS |
+| J7 | `startup_refuse[non_tailscale_public]` | exit!=0 and mentions 'is not assigned' | `rc=1 error="listen address 203.0.113.10 is not assigned to any local interface"` | PASS |
+| J8 | `startup_refuse[lab_flag_missing]` | exit!=0 and mentions 'allow_non_tailscale_bind' | `rc=1 error="security.require_tailscale_bind=false requires security.allow_non_tailscale_bind=true for an explicit lab configuration"` | PASS |
+| J9 | `startup_refuse[missing_token]` | exit!=0 and mentions 'is not set' | `rc=1 error="auth.token_env \"` | PASS |
+| J10 | `startup_refuse[short_token]` | exit!=0 and mentions 'at least 16 characters' | `rc=1 error="auth.token_env \"` | PASS |
+| J11 | `no_stray_listener_from_refusals` | only the main service listener on 8443 | `100.81.98.125:8443` | PASS |
+
+#### K. restart resilience and journal hygiene
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| K1 | `restart_active` | active | `active` | PASS |
+| K2 | `restart_bind_unchanged` | 100.81.98.125:8443 | `100.81.98.125:8443` | PASS |
+| K3 | `restart_auth_and_health` | 200 with token | `200` | PASS |
+| K4 | `restart_still_requires_token` | 401 without token | `401` | PASS |
+| K5 | `journal_no_secret_or_path_leak` | no token/config path/binary path | `none` | PASS |
+| K6 | `journal_clean_no_warn_error` | no WARN/ERROR lines | `` | PASS |
+
+#### L. graceful shutdown reaps in-flight traces
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| L1 | `child_running_before_shutdown` | >=1 nexttrace child | `children=1` | PASS |
+| L2 | `shutdown_reaps_children` | service stopped, no orphan nexttrace | `stopped=1 orphans=none` | PASS |
+| L3 | `shutdown_logged` | journal 'shutdown requested; cancelling in-flight traces' | `shutdown requested; cancelling in-flight traces` | PASS |
+| L4 | `healthy_after_shutdown_cycle` | 200 | `200` | PASS |
+
+#### M. transport hardening (slowloris / header size / auth edges)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| M1 | `read_header_timeout_5s` | connection closed by server ~5s on incomplete headers | `closed_after=5.0s bytes=0` | PASS |
+| M2 | `max_header_bytes` | 431 for ~40KiB header | `code=431` | PASS |
+| M3 | `auth_token_prefix_rejected` | 401 | `401` | PASS |
+| M4 | `auth_scheme_case_insensitive` | 200 (RFC 7235 scheme is case-insensitive) | `200` | PASS |
+| M5 | `unknown_path_with_token` | 404 not_found | `404 not_found` | PASS |
+| M6 | `head_not_allowed` | 405 | `code=405` | PASS |
+| M7 | `left_running_for_phase2` | active | `active` | PASS |
+
+## 6. Real trace evidence (IPv4 and IPv6)
+
+Command template (token read from the `0600` env file on the host; never printed):
+
+```bash
+TOKEN=$(sed -n 's/^TRACECAT_AGENT_TOKEN=//p' /etc/tracecat/agent.env)
+curl -sS -m 120 -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data-binary '{"schema_version":"tracecat.agent.v1",
+                  "job_id":"<32 hex>","node_id":"debian-test-1",
+                  "target_ip":"1.1.1.1","family":"ipv4","protocol":"icmp",
+                  "max_hops":40,"queries":1,"timeout_ms":60000}' \
+  http://100.81.98.125:8443/v1/trace
+```
+
+IPv4 (`1.1.1.1`, `max_hops=40`) — **completed, destination reached**; full
+response kept in `verify/artifacts/trace-ipv4-1.1.1.1.json`:
+
+```json
+{"status":"completed",
+ "summary":{"hop_count":14,"reached_destination":true,"destination_rtt_ms":191.546,
+            "replies":7,"probes":14},
+ "parser_schema":"nexttrace.json.v1","nexttrace_version":"v1.7.3",
+ "raw_result":{"Hops":[[{"Success":true,"Address":{"IP":"11.82.200.193","Zone":""}, ...}]]}}
+```
+
+Representative hops observed (success, address, rtt, asn, country):
+`11.82.200.193 1.129ms`, `10.200.77.117 2.799ms`,
+`101.226.210.81 2.441ms AS4812 China`, `202.97.35.86 6.666ms AS4134 China`,
+`172.69.117.60 66.984ms AS13335 Singapore`, `1.1.1.1 191.546ms AS13335 Anycast`.
+The response is 7.0 KiB, `raw_result` is 4,571 bytes of pure JSON (no advisory
+text, no ANSI), well below `max_raw_bytes=1 MiB`.
+
+IPv6 (`2606:4700:4700::1111`, `max_hops=12`) — **completed**, 12 hops, 6 replies,
+honest `reached_destination=false` because the unicast tail of the path does not
+answer within the probe budget; sample in
+`verify/artifacts/trace-ipv6-2606-4700-4700-1111.json`. Real metadata exercised
+sanitization, including UTF-8 ISP names:
+
+```json
+{"success":true,"address":"2402:4e00:21b9:8017::1","rtt_ms":1.303,
+ "asn":45090,"country":"China","region":"Beijing",
+ "owner":"tencent.com","isp":"腾讯","lat":39.90420913696289,"lng":116.40739440917969}
+```
+
+`verify/check_trace_response.py` result for both artifacts: **42/42 checks** —
+schema/status/family/target echo, canonical hop addresses, RTT bounds,
+`no_reply` semantics (failed probes carry no address/RTT), summary consistency,
+ASN/geo bounds, MPLS bound, `raw_result` bounded and untruncated, and no control
+characters, ANSI escapes or HTML markup anywhere in the decoded strings. The
+harness adds a 43rd check (bearer token absent from the response).
+
+## 7. CAP_NET_RAW proof for the unprivileged child
+
+Captured live while a real trace was running (`max_hops=40`, target `1.1.1.1`):
+
+```text
+child_pid=3594845
+== cmdline (NUL->space) ==
+/usr/local/bin/nexttrace -4 --json -q 1 -m 40 --timeout 1000 1.1.1.1
+== executable ==
+/usr/local/bin/nexttrace
+== ps (pid,ppid,pgid,user,comm) ==
+3594845 3594070 3594845 tracecat nexttrace
+== parent agent pid ==
+3594070 /usr/local/bin/tracecat-agent -config /etc/tracecat/agent.json
+== status caps ==
+CapPrm: 0000000000002000
+CapEff: 0000000000002000
+CapBnd: 0000000000002000
+CapAmb: 0000000000002000
+NoNewPrivs: 1
+Seccomp: 2
+== environ (NUL->newline) ==
+PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+HOME=/var/lib/tracecat
+LANG=C
+LC_ALL=C
+NO_COLOR=1
+== trace -> completed {'hop_count': 14, 'reached_destination': True, ...}
+```
+
+Interpretation:
+
+- `0x2000` is bit 13 = `CAP_NET_RAW`, present in permitted/effective/bounding and
+  ambient sets, so the **unprivileged** child can open raw ICMP sockets without
+  root, setuid or a `setcap` binary. `NoNewPrivs=1` and `Seccomp=2` show the
+  systemd hardening is still active.
+- The argv is exactly the typed vector: family, `--json`, `-q`, `-m`,
+  `--timeout`, then the canonical target **last**. No shell, no request-derived
+  string, no second positional argument.
+- The child's process group id equals its pid (own group → group kill is
+  effective), and its parent is the Agent.
+- The environment is exactly the five fixed variables; the bearer token,
+  TraceCat config and unrelated variables are absent.
+
+## 8. Cancellation, concurrency and graceful shutdown
+
+| Observation | Command / evidence | Result |
+| --- | --- | --- |
+| Client disconnect kills the process group | `timeout 2 curl … long trace`, then poll `pgrep nexttrace` | no child within 12 s; journal `status=cancelled error_code=cancelled`; Agent stays `active` |
+| Concurrency limit | 4 long traces in flight, 5th request | `503 {"error":{"code":"busy"}}`; 4 children observed; health `200` afterwards |
+| Graceful shutdown | long trace in flight, `systemctl stop tracecat-agent` | service stopped, no orphan `nexttrace`; journal `shutdown requested; cancelling in-flight traces`; healthy after restart |
+| Restart resilience | `systemctl restart` | same single tailnet listener, `200` with token, `401` without |
+| Stalled handshake | TCP connect + half a header, wait | connection closed after 5.0 s (`ReadHeaderTimeout=5s`) |
+| Header flood | ~40 KiB request header | `431` (`MaxHeaderBytes=16 KiB`) |
+
+## 9. Provider / network caveat (not a defect)
+
+This vantage point's upstream filters ICMP TTL-exceeded for early hops:
+`ping -c1 -t 1 1.1.1.1` loses 100 % while normal ICMP echo succeeds and IPv4/IPv6
+`nexttrace` deep hops do get replies. Therefore some hops are legitimately
+`success=false, error_code="no_reply"`. This must **not** be read as a broken
+route: the IPv4 trace still reached `1.1.1.1` (14 hops, 7 replies, 191.5 ms) and
+the dashboard copy already tells users that `no_reply` is normal. The verifier
+records this explicitly so future runs are compared against the right baseline.
+
+## 10. Residual risks and operator recommendations
+
+- **Keep `MemoryDenyWriteExecute` off in the Agent unit.** It is intentional and
+  commented; the Controller unit may keep it. Re-adding it silently breaks all
+  traces (D1).
+- **Retest after any NextTrace upgrade**: run
+  `verify/agent-remote-verify.sh` (or at least `sudo -u tracecat nexttrace
+  --json -q 1 -m 1 1.1.1.1` as the documented smoke test) and confirm
+  `/v1/health` reports the new version and all capabilities. v1.7.x's stdout
+  advisory is tolerated by the parser, but a future banner format change could
+  still require a parser update.
+- **Tailnet ACLs were not applicable in this phase** (no Controller tag existed
+  yet); `deploy/tailscale/acl.hujson.example` must be applied before the
+  Controller is trusted to reach port 8443. The Agent's own bearer token is the
+  only application-layer authentication and it works, but ACLs are the second
+  layer.
+- **Token handling**: env file `0600 root:root`, referenced by name only; root on
+  the host can read it (accepted limitation), so keep the host hardened and
+  rotate tokens on a schedule.
+- **Cleartext HTTP on the tailnet** is by design (WireGuard provides transport
+  security) — do not expose port 8443 on a public interface; the Agent will not
+  bind one.
+- **In-memory rate limits** reset on restart and are not shared between Agents
+  (documented design); don't rely on them as a billing boundary.
+- **PIDs/uptime leaks**: none observed; health/error bodies contain no paths,
+  environment or stderr.
+
+## 11. Reproducing this run
+
+```bash
+# 1. build + deploy the Agent (from the shared checkout, key-based ssh to the host)
+TESTHOST=root@124.222.154.86 verify/setup-testhost-agent.sh
+
+# 2. copy the harness to the host and run it as root
+scp verify/agent-remote-verify.sh verify/check_trace_response.py \
+    root@124.222.154.86:/root/tc-verify/
+ssh root@124.222.154.86 'bash /root/tc-verify/agent-remote-verify.sh'
+# expected tail: ===== SUMMARY: 126 PASS, 0 FAIL, 1 SKIP =====
+
+# 3. optional: validate a saved trace response offline
+python3 verify/check_trace_response.py verify/artifacts/trace-ipv4-1.1.1.1.json \
+        --family ipv4 --target 1.1.1.1
+```
+
+The harness prints one `CHECK / expected / observed / PASS|FAIL` line per check
+and a TSV file at `/tmp/tracecat-verify-results.tsv` for auditing. It contains no
+secrets: the token is read from `/etc/tracecat/agent.env` on the host and passed
+to `curl` via a mode-0600 config file, never on the command line or in output.
+
+## 12. Phase 2 — Controller + dashboard + local auth
+
+### 12.1 Deployment under test
+
+Deployed with `verify/setup-testhost-fullstack.sh` (builds both binaries on the
+Mac, ships them with the repo units, generates secrets on the host):
+
+```bash
+# cross-compile (no CGO, no Node needed: dashboard assets are committed)
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/tracecat-agent ./cmd/tracecat-agent
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/tracecat-controller ./cmd/tracecat-controller
+
+SKIP_BUILD=1 verify/setup-testhost-fullstack.sh
+```
+
+- Controller unit: repo `deploy/systemd/tracecat-controller.service`,
+  **unmodified** (`User=tracecat`, `MemoryDenyWriteExecute=true`,
+  `ProtectSystem=strict`, `CapabilityBoundingSet=`, `StateDirectory=tracecat`).
+  The Controller runs fine under W^X (unlike the Agent, which execs NextTrace).
+- Config: `/etc/tracecat/controller.json` (`0640 root:tracecat`, no secrets in
+  the file), dev auth, `listen 127.0.0.1:8080`,
+  `public_origin http://127.0.0.1:18090`, agents `debian-test-1`/`debian-test-2`.
+- Secrets: `/etc/tracecat/controller.env` (`0600 root:root`) holds only the two
+  Agent bearer tokens (`TRACECAT_AGENT_TOKEN_1/2`); the local-auth instance's
+  PBKDF2 hash lives in `/etc/tracecat/controller-local.env` (`0600`), and the
+  random test password is kept only in `/root/tc-verify/local-password.txt`
+  (`0600`, never printed). Secrets are never logged or returned.
+- A second Controller instance in **local** auth mode
+  (`/etc/tracecat/controller-local.json`, `127.0.0.1:8081`, SQLite
+  `controller-local.db`) is used for the auth/CSRF/session suite. To exercise
+  rate limiting its config deliberately uses small limits
+  (`3` jobs/min, `5` resolves/min); the dev instance keeps production-like
+  values.
+- A second Agent instance (`tracecat-agent-b`, node `debian-test-2`,
+  `100.81.98.125:8444`, own token) provides a genuine second vantage point for
+  multi-node jobs and comparison.
+
+Observed listeners (only loopback for the Controllers, only the tailnet address
+for the Agents):
+
+```text
+LISTEN 100.81.98.125:8443  tracecat-agent      (node debian-test-1)
+LISTEN 100.81.98.125:8444  tracecat-agent      (node debian-test-2)
+LISTEN 127.0.0.1:8080      tracecat-controller (dev auth)
+LISTEN 127.0.0.1:8081      tracecat-controller (local auth)
+```
+
+Startup log (no secrets or paths):
+
+```text
+{"level":"INFO","msg":"tracecat-controller listening","listen":"127.0.0.1:8080","public_origin":"http://127.0.0.1:18090","auth_mode":"dev","agents":2}
+```
+
+### 12.2 Result summary
+
+| Suite | Checks | Result |
+| --- | --- | --- |
+| Controller (dev instance, API/SSE/export/history/cancel/reconciliation/allowlist/static) | 125 | **125 PASS, 0 FAIL** |
+| Local auth (PBKDF2, cookies, CSRF, logout, SQLite sessions, rate limits, headers) | 58 | **57 PASS, 0 FAIL, 1 SKIP** |
+| Browser proof (headless Chrome over the SSH tunnel) | 17 | **17 PASS, 0 FAIL** |
+| Phase 2 total | 200 | **199 PASS, 0 FAIL, 1 SKIP** |
+
+Key end-to-end evidence:
+
+- `POST /api/v1/resolve {"target":"example.com"}` → 4 addresses
+  (2 IPv4 + 2 IPv6), `requires_selection=true`, GeoDNS warning present.
+- Multi-node job on both tailnet Agents: job `completed`, both nodes
+  `completed` with 14 hops, destination reached, aggregates
+  (`debian-test-1: 14 hops, 5 replies, 241.2 ms` /
+  `debian-test-2: 14 hops, 5 replies, 217.1 ms`), destination hop PTR
+  `one.one.one.one`.
+- SSE: `text/event-stream`, 4 bare `event: job` snapshots, terminal snapshot,
+  server closes the stream (curl exits 0, not a client timeout).
+- Export: `Content-Disposition: attachment`, two bounded raw results
+  (~3.5 KB each), valid JSON with no NextTrace advisory text.
+- History: job persisted across a Controller restart; hops omitted from list
+  responses; restart reconciliation leaves no `pending`/`running` rows.
+- Cancellation: 200 accepted, nodes become `cancelled`, both Agents reap their
+  `nexttrace` process groups within 15 s; cancelling a terminal job → `409`;
+  unknown job → `404`.
+- Allowlist: default policy still rejects `10.0.0.1` (422); a temporary
+  Controller configured with `security.allowed_cidrs: ["10.0.0.0/8"]` resolves
+  it (200) while `0.0.0.0/0` and malformed CIDRs refuse startup.
+- Local auth: PBKDF2 login success/failure, `HttpOnly; SameSite=Strict;
+  Path=/` cookie (no `Secure` on http origin, as documented), CSRF/Origin/
+  `Sec-Fetch-Site` enforcement (403), logout revocation (204 + `Max-Age=0`,
+  old cookie then 401), sessions stored as SHA-256 hashes in SQLite and still
+  valid after a Controller restart (raw token absent from the DB files),
+  per-client rate limits for login/resolve/jobs (429).
+- Dev mode: loopback-only listener, `403` for `X-Forwarded-For`/`X-Real-IP`/
+  `X-Forwarded-Host`, forged Cloudflare identity headers ignored, dev-bypass
+  warning in the session and dashboard.
+- Dashboard: strict CSP (`default-src 'self'; script-src 'self'; ...;
+  frame-ancestors 'none'`), `nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer`, `Permissions-Policy`,
+  `Cross-Origin-Opener-Policy: same-origin`, hashed assets with immutable
+  caching, HTML revalidated (`no-cache`), no directory listing and no path
+  traversal/file disclosure; the JS bundle contains no tokens, Agent URLs or
+  server paths.
+
+### 12.3 Controller (dev-auth instance) results
+
+#### A. deployment posture
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| A1 | `unit_enabled` | enabled | `enabled` | PASS |
+| A2 | `unit_active` | active | `active` | PASS |
+| A3 | `runs_as_unprivileged` | tracecat | `tracecat` | PASS |
+| A4 | `no_new_privileges` | yes | `yes` | PASS |
+| A5 | `protect_system` | strict | `strict` | PASS |
+| A6 | `memory_deny_write_execute` | yes (Controller never execs nexttrace) | `yes` | PASS |
+| A7 | `loopback_only_listener` | 127.0.0.1:8080 | `127.0.0.1:8080` | PASS |
+| A8 | `no_wildcard_listener` | no 0.0.0.0/:: on 8080 | `127.0.0.1:8080` | PASS |
+| A9 | `not_publicly_reachable` | no HTTP 200 | `code=000` | PASS |
+| A10 | `config_permissions` | 640 root:tracecat | `640 root:tracecat` | PASS |
+| A11 | `env_file_permissions` | 600 root:root | `600 root:root` | PASS |
+| A12 | `database_permissions` | 0600 owner tracecat | `600 tracecat:tracecat` | PASS |
+| A13 | `process_user` | tracecat | `tracecat` | PASS |
+
+#### A2. target allowlist configuration (security.allowed_cidrs)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| A2.1 | `allowlist_rejects_default_route` | startup fails: 0.0.0.0/0 rejected | `rc=1 configuration error: config: security.allowed_cidrs: invalid target policy: "0.0.0.0/0" is` | PASS |
+| A2.2 | `allowlist_rejects_invalid_cidr` | startup fails on malformed CIDR | `rc=1 configuration error: config: security.allowed_cidrs: invalid target policy: "not-a-cidr":` | PASS |
+| A2.3 | `allowlist_instance_started` | temporary controller with 10.0.0.0/8 allowlist | `up=1` | PASS |
+| A2.4 | `allowlist_allows_configured_cidr` | 10.0.0.1 resolves (200 kind=ip) | `code=200 kind=ip` | PASS |
+| A2.5 | `default_policy_still_denies` | main instance 422 target_rejected | `422 target_rejected` | PASS |
+
+#### B. health and session (dev auth mode)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| B1 | `healthz_ok` | 200 {status:ok} | `200 ok` | PASS |
+| B2 | `healthz_minimal` | only status+schema_version | `schema_version,status` | PASS |
+| B3 | `dev_session_authenticated` | 200 authenticated=true | `200 True mode=dev` | PASS |
+| B4 | `session_csrf_token` | >=32 chars | `len=43` | PASS |
+| B5 | `session_limits_match_config` | max_hops=30 max_queries=3 | `30/3/60000` | PASS |
+| B6 | `dev_mode_warning` | warning about dev bypass in session | `dev authentication bypass is enabled; never expose this Controller to untrusted networks` | PASS |
+| B7 | `dev_rejects_xff` | 403 | `403 forbidden` | PASS |
+| B8 | `dev_rejects_x_real_ip` | 403 | `403 forbidden` | PASS |
+| B9 | `dev_rejects_xfh` | 403 | `403 forbidden` | PASS |
+| B10 | `login_absent_in_dev` | 404 | `404 not_found` | PASS |
+| B11 | `logout_absent_in_dev` | 404 | `404 not_found` | PASS |
+| B12 | `identity_headers_ignored` | 200 dev (forged JWT ignored in dev mode) | `200 mode=dev` | PASS |
+| B13 | `identity_email_header_not_trusted` | user stays dev@localhost | `200 user=dev@localhost` | PASS |
+
+#### C. node registry
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| C1 | `nodes_ok` | 200 | `200` | PASS |
+| C2 | `nodes_count` | 2 | `2` | PASS |
+| C3 | `agents_health_ok` | both agents ok with v1.7.3 | `debian-test-1=ok/v1.7.3,debian-test-2=ok/v1.7.3` | PASS |
+| C4 | `nodes_no_url_or_secret_leak` | no agent URLs/tokens/paths | `none` | PASS |
+
+#### D. central DNS resolution
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| D1 | `resolve_literal` | 200 kind=ip | `200 kind=ip n=1` | PASS |
+| D2 | `literal_preselectable` | requires_selection=false | `False` | PASS |
+| D3 | `resolve_domain` | 200 kind=domain | `200 kind=domain` | PASS |
+| D4 | `domain_addresses_valid` | valid canonical A/AAAA entries | `4 addresses families=ipv4,ipv6 selection=True trunc=False warnings=1` | PASS |
+| D5 | `domain_cdn_warning` | GeoDNS warning present | `Agents trace the centrally resolved IP. For CDN and GeoDNS services, paths may differ from resolving the hostname locally on each Agent.` | PASS |
+| D6 | `resolution_selection_semantics` | requires_selection == (count>1) | `n=4 selection=True` | PASS |
+| D7 | `resolve_multi_address_domain` | 200 with multiple choices | `200 1 addresses families=ipv4 selection=False` | PASS |
+| D8 | `resolve_reject[not a domain"}]` | 400/422 | `400 invalid_request` | PASS |
+| D9 | `resolve_reject[example.com;id"}]` | 400/422 | `400 invalid_request` | PASS |
+| D10 | `resolve_reject[10.0.0.1"}]` | 400/422 | `422 target_rejected` | PASS |
+| D11 | `resolve_reject[203.0.113.10"}]` | 400/422 | `422 target_rejected` | PASS |
+| D12 | `resolve_reject[http://example.com/"}]` | 400/422 | `400 invalid_request` | PASS |
+| D13 | `resolve_body_over_1kib` | 413 | `413 payload_too_large size=2015` | PASS |
+
+#### E. multi-node job, SSE, history, export
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| E1 | `resolve_ip_for_job` | 1.1.1.1 | `1.1.1.1` | PASS |
+| E2 | `job_create_multi_node` | 202 | `202` | PASS |
+| E3 | `job_id_shape` | 32 hex | `f6f73e0b6aa3d53cc6714fb1e96c166c` | PASS |
+| E4 | `job_initial_status` | pending/running | `pending` | PASS |
+| E5 | `sse_connect` | 200 | `200` | PASS |
+| E6 | `sse_content_type` | text/event-stream | `text/event-stream` | PASS |
+| E7 | `sse_event_job` | event: job snapshot(s) | `events=4` | PASS |
+| E8 | `sse_snapshots_bare_json` | job snapshots, terminal close | `4 snapshots, terminal=completed, nodes=2` | PASS |
+| E9 | `sse_closed_on_terminal` | server closed stream (curl exit 0, not timeout) | `curl_exit=0 code=200` | PASS |
+| E10 | `job_completed` | completed | `completed` | PASS |
+| E11 | `both_nodes_completed_with_hops` | both completed, hops parsed | `debian-test-1=completed/hops=14 debian-test-2=completed/hops=14` | PASS |
+| E12 | `job_node_summaries` | per-node summaries present | `debian-test-1: {'hop_count': 14, 'reached_destination': True, 'destination_rtt_ms': 234.109, 'replies': 5, 'probes': 14} \| debian-test-2: {'hop_count': 14, 'reached_destination': True, 'destination_rtt_ms': 232.209, 'replies': 5, 'probes': 14}` | PASS |
+| E13 | `destination_ptr_reverse_dns` | 1.1.1.1 hop shows one.one.one.one | `reverse_dns=True records=['debian-test-1/1.1.1.1=one.one.one.one', 'debian-test-2/1.1.1.1=one.one.one.one']` | PASS |
+| E14 | `export_ok` | 200 | `200` | PASS |
+| E15 | `export_content_disposition` | attachment filename | `attachment; filename="tracecat-f6f73e0b6aa3d53cc6714fb1e96c166c.json"` | PASS |
+| E16 | `export_structure_bounded_raw` | 2 raw results, pure JSON, no banner | `raw_results=['debian-test-1', 'debian-test-2'] sizes={'debian-test-1': 3626, 'debian-test-2': 3629}` | PASS |
+| E17 | `export_no_banner_text` | no NextTrace advisory | `none` | PASS |
+| E18 | `history_list` | 200 | `200` | PASS |
+| E19 | `history_persists_across_restart` | job retrievable after restart | `200 id=f6f73e0b6aa3d53cc6714fb1e96c166c` | PASS |
+| E20 | `controller_restart_healthy` | active | `active` | PASS |
+
+#### F. cancellation across both Agents
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| F1 | `cancel_job_created` | 202 | `202 id=15e094ee730c80444cdb0ed62c20dbd0` | PASS |
+| F2 | `agents_running_traces` | >=1 nexttrace child | `children=2` | PASS |
+| F3 | `cancel_request_accepted` | 200 with job id (cancellation is asynchronous) | `200 id=15e094ee730c80444cdb0ed62c20dbd0 status=running` | PASS |
+| F4 | `cancel_reaps_agent_children` | no nexttrace child within 15s | `reaped` | PASS |
+| F5 | `cancel_terminal_state` | cancelled | `cancelled nodes=debian-test-1:cancelled,debian-test-2:cancelled` | PASS |
+| F6 | `cancelled_nodes` | node statuses cancelled | `debian-test-1:cancelled,debian-test-2:cancelled` | PASS |
+| F7 | `cancel_terminal_job_conflict` | 409 conflict | `409 conflict` | PASS |
+| F8 | `cancel_unknown_job` | 404 | `404 not_found` | PASS |
+
+#### F2. restart reconciliation (no stale running jobs)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| F2.1 | `recon_job_created` | 202 | `202` | PASS |
+| F2.2 | `recon_job_running` | >=1 nexttrace child | `children=2` | PASS |
+| F2.3 | `controller_auto_restarted_after_crash` | systemd Restart=on-failure restarted it | `old=3615609 new=3615787` | PASS |
+| F2.4 | `interrupted_job_marked_failed` | failed job + failed nodes with internal error | `job=failed nodes=debian-test-1:failed/internal,debian-test-2:failed/internal` | PASS |
+| F2.5 | `reconciliation_logged` | journal warns about reconciled jobs | `marked jobs interrupted by a previous Controller process as failed` | PASS |
+| F2.6 | `history_has_no_stale_running_jobs` | history clean after restart | `stale_running=[]` | PASS |
+| F2.7 | `job_creation_after_reconciliation` | 202 | `202` | PASS |
+
+#### G. limits, validation and API surface
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| G1 | `jobs_reject[hops31]` | 400 | `400 invalid_request` | PASS |
+| G2 | `jobs_reject[queries4]` | 400 | `400 invalid_request` | PASS |
+| G3 | `jobs_reject[timeout_low]` | 400 | `400 invalid_request` | PASS |
+| G4 | `jobs_reject[timeout_high]` | 400 | `400 invalid_request` | PASS |
+| G5 | `jobs_reject[empty_nodes]` | 400 | `400 invalid_request` | PASS |
+| G6 | `jobs_reject[unknown_node]` | 403 | `403 forbidden` | PASS |
+| G7 | `jobs_reject[private_target]` | 422 | `422 target_rejected` | PASS |
+| G8 | `jobs_reject[bad_protocol]` | 400 | `400 invalid_request` | PASS |
+| G9 | `jobs_unknown_field` | 400 | `400 invalid_request` | PASS |
+| G10 | `jobs_malformed_json` | 400 | `400 invalid_request` | PASS |
+| G11 | `jobs_body_over_8kib` | 413 | `413 payload_too_large size=9150` | PASS |
+| G12 | `unknown_job_get` | 404 not_found | `404 not_found` | PASS |
+| G13 | `api_unknown_path_json` | 404 JSON | `404 not_found ct=application/json; charset=utf-8` | PASS |
+| G14 | `api_root_json_not_spa` | 404 JSON | `404 not_found` | PASS |
+| G15 | `method_not_allowed_json` | 405 Allow: GET | `405 Allow=GET` | PASS |
+| G16 | `healthz_post_method` | 405 | `405 Allow=GET` | PASS |
+| G17 | `history_limit_validation` | clamped or 400 | `200` | PASS |
+
+#### H. embedded dashboard and security headers
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| H1 | `dashboard_root` | 200 | `200` | PASS |
+| H2 | `dashboard_content_type` | text/html | `text/html; charset=utf-8` | PASS |
+| H3 | `csp_present` | default-src 'self' + frame-ancestors 'none' | `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame` | PASS |
+| H4 | `security_header[X-Content-Type-Options]` | present | `nosniff` | PASS |
+| H5 | `security_header[X-Frame-Options]` | present | `DENY` | PASS |
+| H6 | `security_header[Referrer-Policy]` | present | `no-referrer` | PASS |
+| H7 | `security_header[Permissions-Policy]` | present | `accelerometer=(), camera=(), geolocation=(), microphone=(), payment=(), usb=()` | PASS |
+| H8 | `security_header[Cross-Origin-Opener-Policy]` | present | `same-origin` | PASS |
+| H9 | `nosniff` | nosniff | `nosniff` | PASS |
+| H10 | `frame_deny` | DENY | `DENY` | PASS |
+| H11 | `html_never_reused_without_validation` | no-store or no-cache | `no-cache` | PASS |
+| H12 | `html_references_committed_assets` | hashed JS asset | `/assets/index-zxuUbZyc.js` | PASS |
+| H13 | `js_asset_served` | 200 text/javascript | `200 text/javascript; charset=utf-8` | PASS |
+| H14 | `js_asset_immutable_cache` | immutable | `public, max-age=31536000, immutable` | PASS |
+| H15 | `css_asset_served` | 200 text/css | `200 text/css; charset=utf-8` | PASS |
+| H16 | `no_directory_listing` | 404 or SPA fallback, never a listing | `200 SPA fallback (no listing), ct=text/html; charset=utf-8` | PASS |
+| H17 | `path_traversal[/assets/../../../../etc/passwd]` | no file disclosure | `307 text/html; charset=utf-8` | PASS |
+| H18 | `path_traversal[/assets/%2e%2e%2f%2e%2e%2fetc%2fpasswd]` | no file disclosure | `200 text/html; charset=utf-8` | PASS |
+| H19 | `path_traversal[/..%2f..%2fetc%2fpasswd]` | no file disclosure | `200 text/html; charset=utf-8` | PASS |
+| H20 | `missing_asset_404` | 404 | `404` | PASS |
+| H21 | `spa_fallback_extensionless` | 200 HTML | `200 text/html; charset=utf-8` | PASS |
+| H22 | `favicon_served` | 200 | `200` | PASS |
+| H23 | `bundle_no_secret_or_node_ip` | no tokens/node IPs/paths | `none` | PASS |
+
+#### I. cleanup and journal hygiene
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| I1 | `journal_no_secret_or_path_leak` | no tokens/hashes/paths | `none` | PASS |
+| I2 | `journal_clean_no_warn_error` | no WARN/ERROR | `` | PASS |
+
+
+### 12.4 Local-auth instance results
+
+#### A. instance posture
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| A1 | `unit_active` | active | `active` | PASS |
+| A2 | `runs_as_unprivileged` | tracecat | `tracecat` | PASS |
+| A3 | `loopback_only` | 127.0.0.1:8081 | `127.0.0.1:8081` | PASS |
+| A4 | `config_permissions` | 640 root:tracecat | `640 root:tracecat` | PASS |
+| A5 | `env_permissions` | 600 root:root | `600 root:root` | PASS |
+| A6 | `database_permissions` | 0600 tracecat | `600 tracecat:tracecat` | PASS |
+
+#### B. default-deny API authentication
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| B1 | `session_unauthenticated` | 401 | `401 unauthorized` | PASS |
+| B2 | `nodes_unauthenticated` | 401 | `401 unauthorized` | PASS |
+| B3 | `resolve_unauthenticated` | 401 | `401 unauthorized` | PASS |
+| B4 | `jobs_unauthenticated` | 401 | `401 unauthorized` | PASS |
+| B5 | `sse_unauthenticated` | 401 | `401 unauthorized` | PASS |
+| B6 | `job_create_unauthenticated` | 401 | `401 unauthorized` | PASS |
+
+#### C. login validation
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| C1 | `login_wrong_password` | 401 | `401 unauthorized` | PASS |
+| C2 | `login_failure_no_cookie` | no session cookie | `len=0` | PASS |
+| C3 | `login_malformed_json` | 400 | `400 invalid_request` | PASS |
+| C4 | `login_unknown_field` | 400 | `400 invalid_request` | PASS |
+| C5 | `login_body_over_4kib` | 413 | `413 payload_too_large size=5017` | PASS |
+| C6 | `login_content_type_not_bypassed` | not 200 (401 or 415); JSON/password still validated | `401 unauthorized` | PASS |
+
+#### D. successful login, cookie attributes, CSRF
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| D1 | `login_success` | 200 authenticated=true | `200 mode=local user=` | PASS |
+| D2 | `login_returns_csrf` | >=32 chars | `len=43` | PASS |
+| D3 | `session_cookie_issued` | tracecat_session set | `len=43` | PASS |
+| D4 | `cookie_httponly` | HttpOnly | `HttpOnly` | PASS |
+| D5 | `cookie_samesite_strict` | SameSite=Strict | `SameSite=Strict` | PASS |
+| D6 | `cookie_path` | Path=/ | `Path=/` | PASS |
+| D7 | `cookie_secure_flag` | Secure only on https origin | `http origin -> no-Secure` | SKIP (not applicable) |
+| D8 | `login_response_no_secret` | no password/hash echo | `none` | PASS |
+| D9 | `session_with_cookie` | 200 mode=local | `200 local` | PASS |
+| D10 | `session_body_no_raw_token` | session token not echoed | `none` | PASS |
+| D11 | `csrf_required_on_post` | 403 csrf_failed | `403 csrf_failed` | PASS |
+| D12 | `csrf_wrong_token` | 403 | `403 csrf_failed` | PASS |
+| D13 | `csrf_valid_token` | 200 | `200 ip` | PASS |
+| D14 | `csrf_wrong_origin` | 403 | `403 csrf_failed` | PASS |
+| D15 | `csrf_cross_site_fetch` | 403 | `403 csrf_failed` | PASS |
+| D16 | `csrf_same_origin_fetch` | 200 | `200 ip` | PASS |
+
+#### E. logout revocation and forged sessions
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| E1 | `second_login` | 200 | `200` | PASS |
+| E2 | `logout_ok` | 204 | `204` | PASS |
+| E3 | `logout_clears_cookie` | expired cookie | `Max-Age=0` | PASS |
+| E4 | `revoked_session_rejected` | 401 | `401 unauthorized` | PASS |
+| E5 | `forged_session_rejected` | 401 | `401 unauthorized` | PASS |
+
+#### F. session persistence in SQLite
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| F1 | `third_login_for_persistence` | 200 | `200` | PASS |
+| F2 | `session_survives_restart` | 200 after controller restart | `200` | PASS |
+| F3 | `local_instance_active_after_restart` | active | `active` | PASS |
+| F4 | `session_storage_hashed_and_persistent` | sha256(token) in SQLite, raw token absent, csrf stored | `tables=['jobs', 'job_nodes', 'sessions'] sessions=9 cols=['token_hash', 'subject', 'email', 'csrf_token', 'created_unix', 'expires_unix'] token_hash=sha256(stored) raw_token_absent=yes` | PASS |
+
+#### G. controller rate limits (local instance has small limits)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| G1 | `resolve_rate_limit` | 5 allowed then 429 | `codes=200 200 200 200 200 429` | PASS |
+| G2 | `resolve_rate_limit_envelope` | 429 rate_limited | `429 rate_limited retry_after=` | PASS |
+| G3 | `job_rate_limit` | 3 allowed then 429 | `codes=202 202 202 429` | PASS |
+
+#### H. login rate limit (per client IP, trusted-proxy aware)
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| H1 | `login_rate_limit` | >=1 x 429 within 13 failures | `codes=401 401 401 401 401 401 401 401 401 401 429 429 429` | PASS |
+| H2 | `login_rate_limit_envelope` | 429 rate_limited | `429 rate_limited retry_after=` | PASS |
+| H3 | `login_rate_limit_per_client` | other client still logs in | `200` | PASS |
+
+#### I. API surface, body limits, dashboard headers
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| I1 | `api_unknown_path_json` | 404 not_found | `404 not_found` | PASS |
+| I2 | `method_not_allowed` | 405 | `405 Allow=GET` | PASS |
+| I3 | `login_get_not_allowed` | 405 | `405 Allow=POST` | PASS |
+| I4 | `jobs_body_over_8kib` | 413 | `413 payload_too_large` | PASS |
+| I5 | `dashboard_shell_public` | 200 HTML (login screen) | `200 text/html; charset=utf-8` | PASS |
+| I6 | `dashboard_csp` | default-src 'self' + frame-ancestors 'none' | `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' da` | PASS |
+| I7 | `dashboard_clickjacking_and_sniffing` | DENY + nosniff | `DENY/nosniff` | PASS |
+
+#### J. secret leakage
+
+| # | Check | Expected | Observed | Result |
+|---|---|---|---|---|
+| J1 | `no_secret_in_responses_or_journal` | no password/hash/tokens | `none` | PASS |
+| J2 | `journal_clean_no_warn_error` | no WARN/ERROR | `` | PASS |
+
+
+### 12.5 Browser proof (headless Chrome over the SSH tunnel)
+
+Method: the Mac is not on the tailnet, so the browser reaches the loopback-only
+Controller through an SSH tunnel; the Controller's `public_origin` is set to
+that tunnel origin so `Origin`/CSRF checks match a real deployment.
+
+```bash
+ssh -N -L 18090:127.0.0.1:8080 root@124.222.154.86 &
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new \
+  --remote-debugging-port=9333 --user-data-dir=/tmp/tc-verify-chrome \
+  --no-first-run --no-default-browser-check --disable-gpu --no-proxy-server about:blank &
+CDP_PORT=9333 APP_URL=http://127.0.0.1:18090/ OUT_DIR=verify/screenshots \
+  node verify/e2e/drive.mjs
+```
+
+The driver navigates the real UI, resolves `example.com`, requires an explicit
+address pick, selects both Agents, starts a real trace, waits for terminal
+state, opens the Compare view, switches to a 390×844 mobile viewport, and
+records console errors, uncaught exceptions and `securitypolicyviolation`
+events from the very first script execution.
+
+| # | Check | Detail | Result |
+|---|---|---|---|
+| B1 | `two_agents_rendered` | checkboxes=2 | PASS |
+| B2 | `agents_healthy_in_ui` | no degraded/unreachable text | PASS |
+| B3 | `domain_returns_choices` | address radios=4 | PASS |
+| B4 | `domain_resolution_shown` | kind=Domain badge present | PASS |
+| B5 | `explicit_address_selected` | selected=104.20.23.154 | PASS |
+| B6 | `agents_selected` | selection summary visible | PASS |
+| B7 | `hop_table_rendered` | rows=30 | PASS |
+| B8 | `both_nodes_in_results` | both node result cards visible | PASS |
+| B9 | `job_completed_in_ui` | completed status, hop data present | PASS |
+| B10 | `honest_no_reply_wording` | no-reply/reached wording present | PASS |
+| B11 | `compare_view_rendered` | compare explanation visible | PASS |
+| B12 | `compare_has_both_paths` | both paths in compare view | PASS |
+| B13 | `mobile_no_horizontal_overflow` | scrollWidth=390 innerWidth=390 | PASS |
+| B14 | `zero_csp_violations` | 0 violations | PASS |
+| B15 | `zero_console_errors` | 0 errors | PASS |
+| B16 | `zero_page_exceptions` | 0 exceptions | PASS |
+| B17 | `assets_same_origin_only` | all local | PASS |
+
+
+Console errors: **0**, CSP violations:
+**0**, uncaught exceptions:
+**0**. All `script`/`link` assets are same-origin
+and local (no external fonts, CDNs or images).
+
+#### Screenshots
+
+The live dashboard with two tailnet Agents, resolved `example.com` (2 IPv4 +
+2 IPv6 choices, explicit destination), and the real 15-TTL results for both
+Agents:
+
+![Dashboard with real multi-node results](../verify/screenshots/results.png)
+
+Side-by-side comparison view (aligned TTL rows, ASN transitions, honest
+`no reply` and destination-latency deltas):
+
+![Comparison view](../verify/screenshots/compare.png)
+
+Initial dashboard (both Agents healthy) and the explicit address-selection
+step:
+
+![Initial dashboard](../verify/screenshots/dashboard.png)
+
+![Resolution and explicit address selection](../verify/screenshots/resolution.png)
+
+390 px mobile viewport (no horizontal overflow):
+
+![Mobile viewport](../verify/screenshots/mobile.png)
+
+Machine-readable browser report: `verify/screenshots/browser-report.json`.
+
+### 12.6 Phase-2 findings and non-blocking observations
+
+No blocking defect was found in Phase 2. The following observations are minor
+and documented rather than worked around:
+
+1. **Dev-mode CSRF tokens rotate on Controller restart.** With
+   `auth.mode=dev` and no `auth.cloudflare.csrf_secret_env`, the stateless CSRF
+   key is random per process, so an already-open dashboard tab receives
+   `403 csrf_failed` after a restart until it reloads the session. Production
+   modes are unaffected (`local` sessions carry a persisted CSRF token;
+   `cloudflare` can pin the key via `csrf_secret_env`). Worth a documentation
+   sentence for dev-mode users.
+2. **Controller `429` responses do not set `Retry-After`** (the Agent does).
+   The API documentation only promises `Retry-After` for the Agent, so this is
+   a minor consistency gap; clients currently back off generically.
+3. **`POST /api/v1/auth/login` does not reject a non-JSON `Content-Type` with
+   `415`**; it still strictly decodes and bounds the JSON body and validates the
+   password (401/400/413 as appropriate), so there is no bypass — only a
+   consistency difference from the Agent API.
+4. **`GET /assets/` returns the SPA index (200), not 404.** This is the
+   documented "SPA fallback for extension-less GET paths" and never a directory
+   listing; traversal attempts (`/assets/../../etc/passwd`, encoded variants)
+   disclose nothing.
+5. The harness deliberately restarts services many times; several rapid starts
+   can trip systemd's default start limiter (`5 starts / 10 s`). The harness now
+   clears `failed` state before restarting. This is a test artefact, but
+   operators should remember that `Restart=on-failure` + `RestartSec=5s` means a
+   crash-looping process eventually backs off (systemd default policy).
+6. The Controller and both Agents were built with the ad-hoc `go build`
+   command above, so they report `version="dev"`; release builds should inject
+   version metadata via `-ldflags`. Cosmetic for verification.
+
+### 12.7 Residual risks
+
+- **Cloudflare Access mode was not deployed** (no Cloudflare account/tunnel in
+  the verification environment). Its JWT/JWKS/allowlist logic is covered by the
+  repository unit tests only; the deployed verification used `dev` and `local`
+  modes. Treat `cloudflare` mode as code-reviewed, not deployment-verified.
+- **Tailnet ACLs are not applied**: the Controller and Agents share a tailnet,
+  but the example ACL (`deploy/tailscale/acl.hujson.example`) requires
+  Controller/Agent tags. The Agent bearer token is enforced, but operators must
+  still apply ACLs so only the Controller can reach `:8443/:8444`.
+- **Agent transport is cleartext HTTP inside WireGuard** (documented design).
+  The Controllers listen only on loopback; the Agents only on the tailnet.
+- **Local/dev auth are single-factor / bypass modes.** Dev mode is refused on
+  non-loopback listeners and rejects forwarding headers, but it must never be
+  exposed; local mode is a single password (use Cloudflare Access with MFA for
+  internet exposure).
+- **Rate limits are in-memory** per Controller/Agent process and reset on
+  restart (documented); they are not a billing/quota boundary.
+- **SSE requires a proxy that supports streaming** (`X-Accel-Buffering: no` is
+  sent); nginx/cloudflared work, buffering proxies will delay snapshots.
+- **Session cookie `Secure`** was not exercised end-to-end because the tunnel
+  uses an `http` origin; the code path is covered by unit tests. A production
+  HTTPS `public_origin` sets `Secure` as documented.
+- **NextTrace is external GPL-3.0 software** and remains a trust dependency;
+  upgrade it deliberately and re-run `verify/agent-remote-verify.sh`.
+
+### 12.8 Reproducing Phase 2
+
+```bash
+# 1. deploy controller + second agent + local-auth instance (from the checkout)
+SKIP_BUILD=1 verify/setup-testhost-fullstack.sh
+
+# 2. host-side suites (as root on the test host)
+scp verify/controller-remote-verify.sh verify/controller-localauth-verify.sh \
+    verify/agent-remote-verify.sh verify/check_trace_response.py root@HOST:/root/tc-verify/
+ssh root@HOST 'bash /root/tc-verify/agent-remote-verify.sh'
+ssh root@HOST 'bash /root/tc-verify/controller-remote-verify.sh'
+ssh root@HOST 'bash /root/tc-verify/controller-localauth-verify.sh'
+
+# 3. browser proof (from the Mac)
+ssh -N -L 18090:127.0.0.1:8080 root@HOST &
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new \
+  --remote-debugging-port=9333 --user-data-dir=/tmp/tc-verify-chrome \
+  --no-first-run --no-default-browser-check --disable-gpu --no-proxy-server about:blank &
+CDP_PORT=9333 APP_URL=http://127.0.0.1:18090/ OUT_DIR=verify/screenshots \
+  node verify/e2e/drive.mjs
+```
+
+Expected: `SUMMARY: 126 PASS, 0 FAIL, 1 SKIP` (agent),
+`SUMMARY: 125 PASS, 0 FAIL, 0 SKIP` (controller),
+`SUMMARY: 57 PASS, 0 FAIL, 1 SKIP` (local auth),
+`SUMMARY 17/17 browser checks passed`.
+
+Note: the repository HEAD at report time (`551f15c`) adds only changelog/documentation
+on top of the verified commit, so the binaries and screenshots above were built and
+captured from exactly the production code at `4e3aa59`.
+
+The services are left running on the test host (`tracecat-agent`,
+`tracecat-agent-b`, `tracecat-controller`, `tracecat-controller-local`) for
+follow-up inspection. All secrets remain on the host; nothing in this
+repository or this report contains a token or password.

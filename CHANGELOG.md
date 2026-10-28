@@ -40,7 +40,8 @@ external NextTrace CLI, with an embedded React dashboard.
   deployment and security documentation, CI and Dependabot.
 - **Verification**: hermetic fake-NextTrace test harness, adversarial security
   suite, and an independent real-host deployment verification report
-  (`docs/VERIFICATION.md`).
+  (`docs/VERIFICATION.md`): 325 PASS / 0 FAIL / 2 environment-N/A SKIPs across
+  Agent, Controller, local-auth and headless-browser suites.
 
 ### Fixed during hardening
 
@@ -60,6 +61,8 @@ external NextTrace CLI, with an embedded React dashboard.
   as a transport error.
 - Controller `security.allowed_cidrs` added so private-lab destinations can be
   explicitly approved at both layers.
+- Controller rate-limit responses now include `Retry-After`, and local login
+  enforces `Content-Type: application/json` (`415`) like the Agent API.
 
 ### Known limitations
 

@@ -638,3 +638,42 @@ func TestShippedExampleConfigsLoad(t *testing.T) {
 		t.Fatal("example public_origin should be https")
 	}
 }
+
+func TestSecurityAllowlistIsEnforced(t *testing.T) {
+	setAgentTokenEnv(t)
+	doc := baseDevConfigDoc()
+	doc["security"] = map[string]any{"allowed_cidrs": []any{"192.168.50.0/24", "fd00:dead:beef::/48"}}
+	cfg, err := LoadConfig(writeConfigDoc(t, doc))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	policy := cfg.TargetPolicy()
+	if _, err := policy.Check("192.168.50.7"); err != nil {
+		t.Errorf("allowlisted IPv4 rejected: %v", err)
+	}
+	if _, err := policy.Check("fd00:dead:beef::1"); err != nil {
+		t.Errorf("allowlisted IPv6 rejected: %v", err)
+	}
+	if _, err := policy.Check("10.0.0.1"); err == nil {
+		t.Error("non-allowlisted private address must still be rejected")
+	}
+	if _, err := policy.Check("1.1.1.1"); err != nil {
+		t.Errorf("global unicast rejected: %v", err)
+	}
+}
+
+func TestSecurityAllowlistRejectsBadConfig(t *testing.T) {
+	setAgentTokenEnv(t)
+	for _, cidrs := range [][]any{
+		{"not-a-cidr"},
+		{"0.0.0.0/0"},
+		{"::/0"},
+		{""},
+	} {
+		doc := baseDevConfigDoc()
+		doc["security"] = map[string]any{"allowed_cidrs": cidrs}
+		if _, err := LoadConfig(writeConfigDoc(t, doc)); err == nil {
+			t.Errorf("allowed_cidrs %v: expected startup error", cidrs)
+		}
+	}
+}

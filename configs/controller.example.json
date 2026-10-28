@@ -5,9 +5,15 @@
     "mode": "cloudflare",
     "cloudflare": {
       "team_domain": "https://example-team.cloudflareaccess.com",
-      "audience": ["REPLACE_WITH_CLOUDFLARE_ACCESS_AUDIENCE_TAG"],
-      "allowed_emails": ["ops@example.com"],
-      "allowed_email_domains": ["example.com"],
+      "audience": [
+        "REPLACE_WITH_CLOUDFLARE_ACCESS_AUDIENCE_TAG"
+      ],
+      "allowed_emails": [
+        "ops@example.com"
+      ],
+      "allowed_email_domains": [
+        "example.com"
+      ],
       "jwks_cache_ttl_seconds": 300,
       "csrf_secret_env": "TRACECAT_CSRF_SECRET"
     }
@@ -32,6 +38,9 @@
     "max_resolves_per_minute": 120,
     "max_raw_result_bytes": 1048576
   },
+  "security": {
+    "allowed_cidrs": []
+  },
   "agents": [
     {
       "id": "tokyo-1",
@@ -54,6 +63,9 @@
       "request_timeout_ms": 75000
     }
   ],
-  "trusted_proxies": ["127.0.0.1/32", "::1/128"],
+  "trusted_proxies": [
+    "127.0.0.1/32",
+    "::1/128"
+  ],
   "log_level": "info"
 }

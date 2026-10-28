@@ -206,6 +206,69 @@ DELETE FROM jobs WHERE id NOT IN (
 	return nil
 }
 
+// MarkInterruptedJobs reconciles jobs left in a non-terminal state by a
+// previous Controller process. Trace jobs are not resumed after a restart, so
+// such jobs (and their still-pending/running nodes) are marked failed with a
+// safe normalized error instead of being reported as "running" forever. It is
+// called once at startup; terminal jobs are never modified.
+func (s *Store) MarkInterruptedJobs(ctx context.Context) (int, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, job_json FROM jobs WHERE status IN (?, ?)`,
+		string(model.JobPending), string(model.JobRunning))
+	if err != nil {
+		return 0, fmt.Errorf("store: list interrupted jobs: %w", err)
+	}
+	type interrupted struct {
+		id  string
+		job model.Job
+	}
+	var found []interrupted
+	for rows.Next() {
+		var id, jobJSON string
+		if err := rows.Scan(&id, &jobJSON); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("store: scan interrupted job: %w", err)
+		}
+		var job model.Job
+		if err := json.Unmarshal([]byte(jobJSON), &job); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("store: decode interrupted job: %w", err)
+		}
+		found = append(found, interrupted{id: id, job: job})
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("store: iterate interrupted jobs: %w", err)
+	}
+	_ = rows.Close()
+
+	now := s.now().UTC().Format(time.RFC3339Nano)
+	marked := 0
+	for _, item := range found {
+		job := item.job
+		if job.Status != model.JobPending && job.Status != model.JobRunning {
+			continue // already terminal; leave untouched
+		}
+		job.Status = model.JobFailed
+		job.EndedAt = now
+		for i := range job.Nodes {
+			if job.Nodes[i].Status.Terminal() {
+				continue
+			}
+			job.Nodes[i].Status = model.NodeFailed
+			job.Nodes[i].EndedAt = now
+			job.Nodes[i].Error = model.NewError(model.ErrInternal,
+				"controller restarted before this trace completed")
+		}
+		job.Summary = model.SummarizeJob(job.Nodes)
+		if err := s.SaveJob(ctx, &job, nil); err != nil {
+			return marked, fmt.Errorf("store: mark interrupted job %s: %w", item.id, err)
+		}
+		marked++
+	}
+	return marked, nil
+}
+
 // GetJob returns the full job document. Raw results are fetched separately by
 // GetRawResults.
 func (s *Store) GetJob(ctx context.Context, id string) (*model.Job, error) {

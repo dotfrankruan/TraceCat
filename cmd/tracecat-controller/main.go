@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/dotfrankruan/tracecat/internal/controller"
-	"github.com/dotfrankruan/tracecat/internal/ipguard"
 	"github.com/dotfrankruan/tracecat/internal/version"
 )
 
@@ -68,15 +67,18 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	logger := newLogger(stderr, cfg.LogLevel)
 
-	policy, err := ipguard.NewPolicy(nil)
-	if err != nil {
-		logger.Error("could not initialize the destination policy", "error", err)
-		return 1
-	}
+	policy := cfg.TargetPolicy()
 	store, err := controller.OpenStore(cfg.Database.Path, cfg.Database.MaxHistoryJobs)
 	if err != nil {
 		logger.Error("could not open the job history database", "error", err)
 		return 1
+	}
+	if marked, err := store.MarkInterruptedJobs(context.Background()); err != nil {
+		logger.Error("could not reconcile interrupted jobs after restart", "error", err)
+		_ = store.Close()
+		return 1
+	} else if marked > 0 {
+		logger.Warn("marked jobs interrupted by a previous Controller process as failed", "count", marked)
 	}
 
 	resolver := controller.NewResolverService(

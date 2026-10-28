@@ -64,12 +64,22 @@ type Config struct {
 	DNS            DNSConfig      `json:"dns"`
 	Limits         LimitsConfig   `json:"limits"`
 	Agents         []AgentConfig  `json:"agents"`
+	Security       SecurityConfig `json:"security"`
 	TrustedProxies []string       `json:"trusted_proxies"`
 	LogLevel       string         `json:"log_level"`
 
 	// Derived, unexported state populated by LoadConfig.
 	publicOrigin  *url.URL
 	trustedPrefix []netip.Prefix
+	targetPolicy  ipguard.Policy
+}
+
+// SecurityConfig contains administrator-controlled target policy extensions.
+// The default policy allows only globally routable unicast destinations; the
+// allowlist is the single explicit way to permit private/lab ranges for
+// testing. The same policy type is enforced independently by Agents.
+type SecurityConfig struct {
+	AllowedCIDRs []string `json:"allowed_cidrs"`
 }
 
 // AuthConfig selects and parameterizes the browser authentication mode.
@@ -263,6 +273,9 @@ func (c *Config) finalize(lookupEnv func(string) (string, bool)) error {
 	if err := c.finalizeAgents(lookupEnv); err != nil {
 		return err
 	}
+	if err := c.finalizeSecurity(); err != nil {
+		return err
+	}
 
 	switch strings.ToLower(strings.TrimSpace(c.LogLevel)) {
 	case "":
@@ -275,6 +288,21 @@ func (c *Config) finalize(lookupEnv func(string) (string, bool)) error {
 
 	return nil
 }
+
+// finalizeSecurity builds the shared destination policy from the explicit
+// administrator allowlist. Invalid CIDRs (including default routes) are a
+// startup error rather than being silently ignored.
+func (c *Config) finalizeSecurity() error {
+	policy, err := ipguard.NewPolicy(c.Security.AllowedCIDRs)
+	if err != nil {
+		return fmt.Errorf("config: security.allowed_cidrs: %w", err)
+	}
+	c.targetPolicy = policy
+	return nil
+}
+
+// TargetPolicy returns the validated destination policy.
+func (c *Config) TargetPolicy() ipguard.Policy { return c.targetPolicy }
 
 func parsePort(port string) (int, error) {
 	var n int

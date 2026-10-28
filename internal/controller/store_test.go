@@ -265,3 +265,67 @@ func TestStoreMemoryDatabase(t *testing.T) {
 		t.Fatalf("GetJob: %v", err)
 	}
 }
+
+func TestStoreMarkInterruptedJobs(t *testing.T) {
+	store := testStore(t, 10)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	interrupted := sampleJob("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1", now, model.JobRunning)
+	interrupted.StartedAt = now.Format(time.RFC3339Nano)
+	interrupted.Nodes[0].Status = model.NodeRunning
+	interrupted.Nodes = append(interrupted.Nodes, model.NodeResult{
+		NodeID: "pending-node", NodeName: "Pending", Status: model.NodePending,
+	})
+	interrupted.Summary = model.SummarizeJob(interrupted.Nodes)
+	if err := store.SaveJob(ctx, interrupted, nil); err != nil {
+		t.Fatalf("SaveJob running: %v", err)
+	}
+	finished := sampleJob("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2", now, model.JobCompleted)
+	finished.EndedAt = now.Format(time.RFC3339Nano)
+	if err := store.SaveJob(ctx, finished, nil); err != nil {
+		t.Fatalf("SaveJob completed: %v", err)
+	}
+
+	marked, err := store.MarkInterruptedJobs(ctx)
+	if err != nil {
+		t.Fatalf("MarkInterruptedJobs: %v", err)
+	}
+	if marked != 1 {
+		t.Fatalf("marked = %d, want 1", marked)
+	}
+	loaded, err := store.GetJob(ctx, interrupted.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if loaded.Status != model.JobFailed {
+		t.Fatalf("job status = %s, want failed", loaded.Status)
+	}
+	if loaded.EndedAt == "" {
+		t.Fatal("interrupted job must get an ended_at timestamp")
+	}
+	for _, node := range loaded.Nodes {
+		if node.Status != model.NodeFailed {
+			t.Errorf("node %s status = %s, want failed", node.NodeID, node.Status)
+		}
+		if node.Error == nil || node.Error.Code != model.ErrInternal {
+			t.Errorf("node %s error = %+v, want internal", node.NodeID, node.Error)
+		}
+	}
+	if loaded.Summary.Failed != 2 {
+		t.Errorf("summary failed = %d, want 2", loaded.Summary.Failed)
+	}
+
+	done, err := store.GetJob(ctx, finished.ID)
+	if err != nil {
+		t.Fatalf("GetJob completed: %v", err)
+	}
+	if done.Status != model.JobCompleted {
+		t.Fatalf("terminal job was modified: status = %s", done.Status)
+	}
+
+	again, err := store.MarkInterruptedJobs(ctx)
+	if err != nil || again != 0 {
+		t.Fatalf("second MarkInterruptedJobs = %d, %v; want 0, nil", again, err)
+	}
+}

@@ -220,6 +220,23 @@ are capped at 16 MiB, and Agent errors are mapped per node
 (`agent_unreachable`, `agent_error`, `timed_out`, `cancelled`) without failing
 other nodes in the same job.
 
+### `security` (object)
+
+Destination policy extensions shared with the Agents. By default only globally
+routable unicast IPs are traceable; loopback, private, link-local, multicast,
+CGNAT/Tailscale, documentation, benchmark and transition ranges are rejected by
+both the Controller and every Agent.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `allowed_cidrs` | no | explicit administrator allowlist of CIDR prefixes for trusted private-network/lab testing (e.g. `192.168.50.0/24`). Default routes (`0.0.0.0/0`, `::/0`) and malformed entries are rejected at startup. |
+
+The allowlist is evaluated before the default deny rules, so it is the only way
+to permit private destinations. Configure the same ranges on the relevant
+Agents (`security.allowed_cidrs` there) — each side enforces the policy
+independently, and an Agent that does not allow the range will reject the job
+with `target_rejected`.
+
 ### `trusted_proxies` (array of CIDR strings)
 
 Addresses allowed to supply client-IP forwarding headers (for example a
@@ -237,6 +254,9 @@ Authorization headers. Request logs omit query strings and headers.
 
 ## Operational notes
 
+- On startup, jobs left `pending`/`running` by a previous process are marked
+  `failed` with a normalized error on their outstanding nodes; traces are never
+  resumed silently after a restart.
 - Graceful shutdown on `SIGINT`/`SIGTERM` stops accepting connections, closes
   SSE streams, cancels in-flight jobs, waits up to 10 seconds, then closes the
   database.

@@ -24,6 +24,9 @@
     "max_resolves_per_minute": 120,
     "max_raw_result_bytes": 1048576
   },
+  "security": {
+    "allowed_cidrs": []
+  },
   "agents": [
     {
       "id": "local-1",

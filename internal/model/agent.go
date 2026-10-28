@@ -18,6 +18,9 @@ type AgentTraceRequest struct {
 	MaxHops       int      `json:"max_hops"`
 	Queries       int      `json:"queries"`
 	TimeoutMS     int      `json:"timeout_ms"`
+	// Port is the destination port for tcp/udp probes and must be omitted for
+	// icmp. It is always a bounded integer validated by both sides.
+	Port *int `json:"port,omitempty"`
 }
 
 // NextTraceInfo describes the locally installed NextTrace binary as detected at
@@ -31,10 +34,11 @@ type NextTraceInfo struct {
 
 // AgentLimits advertises the hard limits the Agent enforces.
 type AgentLimits struct {
-	MaxHops             int `json:"max_hops"`
-	MaxQueries          int `json:"max_queries"`
-	MaxTimeoutMS        int `json:"max_timeout_ms"`
-	MaxConcurrentTraces int `json:"max_concurrent_traces"`
+	MaxHops             int      `json:"max_hops"`
+	MaxQueries          int      `json:"max_queries"`
+	MaxTimeoutMS        int      `json:"max_timeout_ms"`
+	MaxConcurrentTraces int      `json:"max_concurrent_traces"`
+	Protocols           []string `json:"protocols"`
 }
 
 // AgentHealth is the authenticated response of GET /v1/health.
@@ -103,12 +107,19 @@ func (r *AgentTraceRequest) Validate() error {
 	if !r.Protocol.Valid() {
 		return NewError(ErrInvalidRequest, "invalid protocol")
 	}
+	if err := ValidatePortForProtocol(r.Protocol, r.Port); err != nil {
+		return err
+	}
 	return ValidateLimits(r.MaxHops, r.Queries, r.TimeoutMS)
 }
 
 // String is used only in debug logs; it deliberately omits nothing sensitive
 // because the request contains no secrets.
 func (r *AgentTraceRequest) String() string {
-	return fmt.Sprintf("job=%s node=%s target=%s family=%s protocol=%s hops=%d queries=%d timeout_ms=%d",
-		r.JobID, r.NodeID, r.TargetIP, r.Family, r.Protocol, r.MaxHops, r.Queries, r.TimeoutMS)
+	port := ""
+	if r.Port != nil {
+		port = fmt.Sprintf(" port=%d", *r.Port)
+	}
+	return fmt.Sprintf("job=%s node=%s target=%s family=%s protocol=%s%s hops=%d queries=%d timeout_ms=%d",
+		r.JobID, r.NodeID, r.TargetIP, r.Family, r.Protocol, port, r.MaxHops, r.Queries, r.TimeoutMS)
 }

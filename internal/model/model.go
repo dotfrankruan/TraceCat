@@ -44,6 +44,16 @@ const (
 
 	// MaxBatchNodes is the absolute number of Agents a single job may target.
 	MaxBatchNodes = 16
+
+	// MinPort and MaxPort bound the destination port for TCP/UDP probes.
+	MinPort = 1
+	MaxPort = 65535
+
+	// DefaultTCPPort and DefaultUDPPort are the conventional probe ports used
+	// by NextTrace when none is specified; the Controller/UI preselect them but
+	// the user may choose any bounded port.
+	DefaultTCPPort = 80
+	DefaultUDPPort = 33494
 )
 
 // IPFamily is the normalized address family of a target.
@@ -66,17 +76,98 @@ func FamilyOf(addr netip.Addr) IPFamily {
 	return FamilyIPv6
 }
 
-// Protocol is the traceroute probe protocol. Only ICMP is enabled in the MVP;
-// the enum exists so TCP/UDP can be added later without changing the shape of
-// the contract. The Agent must never accept a protocol outside this allowlist.
+// Protocol is the traceroute probe protocol. Only the fixed enum values are
+// accepted: the Agent maps each one to a capability-detected NextTrace flag and
+// never accepts arbitrary flags or protocols from a caller. MTR sessions are
+// not part of the contract.
 type Protocol string
 
 const (
 	ProtocolICMP Protocol = "icmp"
+	ProtocolTCP  Protocol = "tcp"
+	ProtocolUDP  Protocol = "udp"
 )
 
 // Valid reports whether p is an enabled protocol.
-func (p Protocol) Valid() bool { return p == ProtocolICMP }
+func (p Protocol) Valid() bool {
+	switch p {
+	case ProtocolICMP, ProtocolTCP, ProtocolUDP:
+		return true
+	default:
+		return false
+	}
+}
+
+// RequiresPort reports whether p probes a destination port. ICMP does not; TCP
+// and UDP require an explicit bounded port.
+func (p Protocol) RequiresPort() bool {
+	return p == ProtocolTCP || p == ProtocolUDP
+}
+
+// DefaultPort returns the conventional probe port for p, when applicable.
+func (p Protocol) DefaultPort() (int, bool) {
+	switch p {
+	case ProtocolTCP:
+		return DefaultTCPPort, true
+	case ProtocolUDP:
+		return DefaultUDPPort, true
+	default:
+		return 0, false
+	}
+}
+
+// ValidatePortForProtocol enforces the exact protocol/port contract: ICMP must
+// not carry a port, while TCP/UDP must carry one in [MinPort, MaxPort].
+func ValidatePortForProtocol(protocol Protocol, port *int) error {
+	if !protocol.Valid() {
+		return NewError(ErrInvalidRequest, "invalid protocol")
+	}
+	if !protocol.RequiresPort() {
+		if port != nil {
+			return NewError(ErrInvalidRequest, "port must not be set for icmp")
+		}
+		return nil
+	}
+	if port == nil {
+		return NewError(ErrInvalidRequest, fmt.Sprintf("port is required for %s", protocol))
+	}
+	if *port < MinPort || *port > MaxPort {
+		return NewError(ErrInvalidRequest, fmt.Sprintf("port must be between %d and %d", MinPort, MaxPort))
+	}
+	return nil
+}
+
+// ParseProtocolList validates and normalizes an administrator-configured
+// protocol allowlist. Empty input is an error; duplicates are rejected so
+// configuration mistakes are visible at startup rather than silently ignored.
+func ParseProtocolList(entries []string) ([]Protocol, error) {
+	if len(entries) == 0 {
+		return nil, NewError(ErrInvalidRequest, "at least one protocol must be enabled")
+	}
+	seen := make(map[Protocol]struct{}, len(entries))
+	out := make([]Protocol, 0, len(entries))
+	for _, raw := range entries {
+		name := Protocol(strings.ToLower(strings.TrimSpace(raw)))
+		if !name.Valid() {
+			return nil, NewError(ErrInvalidRequest, fmt.Sprintf("unsupported protocol %q", raw))
+		}
+		if _, dup := seen[name]; dup {
+			return nil, NewError(ErrInvalidRequest, fmt.Sprintf("duplicate protocol %q", raw))
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out, nil
+}
+
+// ProtocolNames converts protocols to their wire names, preserving order.
+func ProtocolNames(protocols []Protocol) []string {
+	out := make([]string, len(protocols))
+	for i, p := range protocols {
+		out[i] = string(p)
+	}
+	return out
+}
 
 // NodeStatus is the execution state of one Agent inside one distributed job.
 type NodeStatus string

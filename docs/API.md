@@ -13,12 +13,16 @@ Browser  --(same-origin HTTPS)-->  Controller  --(HTTP over Tailscale)-->  Agent
 - The browser never talks to an Agent.
 - The Agent never resolves DNS for a trace and never accepts a hostname.
 - The Agent's only outbound execution is the locally configured NextTrace
-  binary with a fixed, typed argument vector.
+  binary with a fixed, typed argument vector. Protocols are a fixed enum
+  (`icmp`/`tcp`/`udp`) mapped to capability-detected flags; TCP/UDP destination
+  ports are bounded integers, never strings, ranges or service names.
 
 Shared limits (also in `internal/model/model.go`):
 
 | Limit              | Value                     |
 | ------------------ | ------------------------- |
+| `protocol`         | `icmp`, `tcp` or `udp` (fixed enum; `allowed_protocols` config) |
+| `port`             | 1 .. 65535, required for `tcp`/`udp`, forbidden for `icmp` |
 | `max_hops`         | 1 .. 64                   |
 | `queries`          | 1 .. 5                    |
 | `timeout_ms`       | 5 000 .. 120 000          |
@@ -79,7 +83,8 @@ capabilities and enforced limits.
     "max_hops": 64,
     "max_queries": 5,
     "max_timeout_ms": 120000,
-    "max_concurrent_traces": 4
+    "max_concurrent_traces": 4,
+    "protocols": ["icmp", "tcp", "udp"]
   },
   "time": "2025-01-02T03:04:05.123456789Z"
 }
@@ -93,7 +98,8 @@ capabilities and enforced limits.
 
 ### `POST /v1/trace`
 
-Authenticated. Runs one one-shot ICMP traceroute against one numeric IP.
+Authenticated. Runs one one-shot ICMP, TCP or UDP traceroute against one
+numeric IP. MTR/session streaming is not part of the contract.
 
 Request (strict JSON; unknown fields are rejected; body limited to 64 KiB):
 
@@ -119,11 +125,32 @@ Semantics:
    rejected, even though the Controller resolved the domain earlier.
 2. `family` MUST match the normalized address family.
 3. `node_id` MUST equal the configured `node_id`.
-4. `protocol` MUST be `"icmp"` in the MVP.
-5. `timeout_ms` bounds the entire NextTrace execution, not a single probe.
+4. `protocol` MUST be one of `"icmp"`, `"tcp"` or `"udp"`, and MUST be enabled
+   in both the Agent configuration (`nexttrace.allowed_protocols`) and the
+   installed binary's capability detection.
+5. `port` MUST be omitted for `icmp`, and MUST be a JSON integer in
+   `1 .. 65535` for `tcp`/`udp`. It is never a string, range, list or service
+   name. Example TCP request body (same fields otherwise):
+
+   ```json
+   {
+     "schema_version": "tracecat.agent.v1",
+     "job_id": "8f0c2a1b4d5e6f708192a3b4c5d6e7f8",
+     "node_id": "tokyo-1",
+     "target_ip": "203.0.113.10",
+     "family": "ipv4",
+     "protocol": "tcp",
+     "port": 443,
+     "max_hops": 30,
+     "queries": 3,
+     "timeout_ms": 60000
+   }
+   ```
+
+6. `timeout_ms` bounds the entire NextTrace execution, not a single probe.
    A per-probe timeout is a fixed Agent setting, not a request field.
-6. The Agent's own configured maximums are authoritative: an Agent may reject
-   a request that exceeds its local limits.
+7. The Agent's own configured maximums are authoritative: an Agent may reject
+   a request that exceeds its local limits or disables the requested protocol.
 
 Success response (`200`; the HTTP request succeeded even if the trace failed):
 
@@ -187,6 +214,7 @@ Success response (`200`; the HTTP request succeeded even if the trace failed):
   present it as "no reply".
 - GeoIP/ASN/PTR fields are omitted when NextTrace did not provide them. Never
   synthesize defaults.
+- `port` is echoed for `tcp`/`udp` responses and omitted for `icmp`.
 - `raw_result` is the unmodified structured NextTrace JSON (bounded, default
   max 1 MiB) retained for debugging. It is omitted if too large;
   `raw_result_truncated=true` then indicates that. It is never rendered as
@@ -275,7 +303,8 @@ Returns `200` when authenticated, `401` (error envelope) when not.
     "min_execution_ms": 5000,
     "max_nodes_per_job": 8,
     "max_addresses": 16,
-    "max_history_jobs": 200
+    "max_history_jobs": 200,
+    "protocols": ["icmp", "tcp", "udp"]
   },
   "version": "0.1.0",
   "warnings": []
@@ -377,6 +406,11 @@ Body (strict JSON, <= 8 KiB):
 }
 ```
 
+For `tcp`/`udp`, add `"port": 443` (or any bounded integer); the UI pre-fills
+NextTrace's conventional defaults (80/TCP, 33494/UDP) but the user may change
+the port. For `icmp`, `port` must be absent. The Controller enforces its own
+`limits.allowed_protocols` in addition to each Agent's configuration.
+
 The Controller revalidates the IP with `ipguard` (never trusts `/resolve`),
 validates every node id against the administrative node table, enforces
 authenticated/enabled nodes and server-side limits, generates the job id
@@ -409,7 +443,8 @@ Job document:
   "target_ip": "203.0.113.10",
   "original_target": "example.com",
   "family": "ipv4",
-  "protocol": "icmp",
+  "protocol": "tcp",
+  "port": 443,
   "max_hops": 30,
   "queries": 3,
   "timeout_ms": 60000,

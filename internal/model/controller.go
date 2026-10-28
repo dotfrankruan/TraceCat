@@ -24,13 +24,14 @@ type User struct {
 
 // ControllerLimits is the server-side allowlist of numeric trace limits.
 type ControllerLimits struct {
-	MaxHops        int `json:"max_hops"`
-	MaxQueries     int `json:"max_queries"`
-	MaxExecutionMS int `json:"max_execution_ms"`
-	MinExecutionMS int `json:"min_execution_ms"`
-	MaxNodesPerJob int `json:"max_nodes_per_job"`
-	MaxAddresses   int `json:"max_addresses"`
-	MaxHistoryJobs int `json:"max_history_jobs"`
+	MaxHops        int      `json:"max_hops"`
+	MaxQueries     int      `json:"max_queries"`
+	MaxExecutionMS int      `json:"max_execution_ms"`
+	MinExecutionMS int      `json:"min_execution_ms"`
+	MaxNodesPerJob int      `json:"max_nodes_per_job"`
+	MaxAddresses   int      `json:"max_addresses"`
+	MaxHistoryJobs int      `json:"max_history_jobs"`
+	Protocols      []string `json:"protocols"`
 }
 
 // LoginRequest is the local-auth login body. Only used when auth.mode=local.
@@ -86,9 +87,11 @@ type CreateJobRequest struct {
 	OriginalTarget string   `json:"original_target"`
 	NodeIDs        []string `json:"node_ids"`
 	Protocol       Protocol `json:"protocol"`
-	MaxHops        int      `json:"max_hops"`
-	Queries        int      `json:"queries"`
-	TimeoutMS      int      `json:"timeout_ms"`
+	// Port is required for tcp/udp and must be omitted for icmp.
+	Port      *int `json:"port,omitempty"`
+	MaxHops   int  `json:"max_hops"`
+	Queries   int  `json:"queries"`
+	TimeoutMS int  `json:"timeout_ms"`
 }
 
 // Job is the full distributed trace job returned by the Controller API.

@@ -64,14 +64,15 @@ type ResolveResponse struct {
 
 // NodeInfo is the administrative, non-secret description of an Agent.
 type NodeInfo struct {
-	ID               string `json:"id"`
-	Name             string `json:"name"`
-	Location         string `json:"location,omitempty"`
-	Provider         string `json:"provider,omitempty"`
-	Enabled          bool   `json:"enabled"`
-	Health           string `json:"health"` // "ok", "unreachable", "degraded", "unknown", "disabled"
-	LastSeen         string `json:"last_seen,omitempty"`
-	NextTraceVersion string `json:"nexttrace_version,omitempty"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Location         string   `json:"location,omitempty"`
+	Provider         string   `json:"provider,omitempty"`
+	Enabled          bool     `json:"enabled"`
+	Health           string   `json:"health"` // "ok", "unreachable", "degraded", "unknown", "disabled"
+	LastSeen         string   `json:"last_seen,omitempty"`
+	NextTraceVersion string   `json:"nexttrace_version,omitempty"`
+	Interfaces       []string `json:"interfaces,omitempty"`
 }
 
 // NodeList is returned by GET /api/v1/nodes.
@@ -88,10 +89,14 @@ type CreateJobRequest struct {
 	NodeIDs        []string `json:"node_ids"`
 	Protocol       Protocol `json:"protocol"`
 	// Port is required for tcp/udp and must be omitted for icmp.
-	Port      *int `json:"port,omitempty"`
-	MaxHops   int  `json:"max_hops"`
-	Queries   int  `json:"queries"`
-	TimeoutMS int  `json:"timeout_ms"`
+	Port *int `json:"port,omitempty"`
+	// NodeInterfaces optionally selects a source network interface per node
+	// (node id -> interface name). Omitted/empty means automatic routing. Each
+	// name is validated against that Agent's advertised interface list.
+	NodeInterfaces map[string]string `json:"node_interfaces,omitempty"`
+	MaxHops        int               `json:"max_hops"`
+	Queries        int               `json:"queries"`
+	TimeoutMS      int               `json:"timeout_ms"`
 }
 
 // Job is the full distributed trace job returned by the Controller API.

@@ -26,6 +26,7 @@ Shared limits (also in `internal/model/model.go`):
 | `max_hops`         | 1 .. 64                   |
 | `queries`          | 1 .. 5                    |
 | `timeout_ms`       | 5 000 .. 120 000          |
+| `interface`        | optional Agent interface name (1..15 chars, from that Agent's advertised list); empty = automatic routing |
 | Max nodes per job  | 16 (Controller config, default 8) |
 | Max resolved IPs   | 16 (Controller config)    |
 | Job id             | `^[A-Za-z0-9][A-Za-z0-9_-]{15,63}$` |
@@ -86,13 +87,18 @@ capabilities and enforced limits.
     "max_concurrent_traces": 4,
     "protocols": ["icmp", "tcp", "udp"]
   },
+  "interfaces": ["eth0", "ens5"],
   "time": "2025-01-02T03:04:05.123456789Z"
 }
 ```
 
 - `status`: `ok` when the binary is usable, `degraded` when it is not.
 - `nexttrace.capabilities` is detected from the installed binary's `--help`
-  output; it is never assumed. `nexttrace.error` (safe message only) is set
+  output; it is never assumed. `interfaces` lists the network interfaces the
+  Agent will accept for source-device selection (loopback, down, container,
+  bridge and other virtual interfaces are excluded; the list is empty when the
+  installed binary cannot select a device).
+ `nexttrace.error` (safe message only) is set
   when unavailable.
 - This endpoint never returns the executable path, environment or config.
 
@@ -151,6 +157,10 @@ Semantics:
    A per-probe timeout is a fixed Agent setting, not a request field.
 7. The Agent's own configured maximums are authoritative: an Agent may reject
    a request that exceeds its local limits or disables the requested protocol.
+8. `interface` is optional. When present it must be one of the names advertised
+   by that Agent's `/v1/health` `interfaces` list; the Agent revalidates it
+   against its own enumerated/allowlisted set before use and maps it to a fixed
+   `-D/--dev` argument. Empty/omitted means automatic routing.
 
 Success response (`200`; the HTTP request succeeded even if the trace failed):
 
@@ -215,6 +225,7 @@ Success response (`200`; the HTTP request succeeded even if the trace failed):
 - GeoIP/ASN/PTR fields are omitted when NextTrace did not provide them. Never
   synthesize defaults.
 - `port` is echoed for `tcp`/`udp` responses and omitted for `icmp`.
+- `interface` is echoed when the caller selected one.
 - `raw_result` is the unmodified structured NextTrace JSON (bounded, default
   max 1 MiB) retained for debugging. It is omitted if too large;
   `raw_result_truncated=true` then indicates that. It is never rendered as
@@ -339,7 +350,8 @@ Administratively configured Agents only; no user-supplied Agent URLs exist.
       "enabled": true,
       "health": "ok",
       "last_seen": "2025-01-02T03:04:05Z",
-      "nexttrace_version": "v1.7.3"
+      "nexttrace_version": "v1.7.3",
+      "interfaces": ["eth0", "ens5"]
     }
   ]
 }
@@ -347,6 +359,7 @@ Administratively configured Agents only; no user-supplied Agent URLs exist.
 
 `health` is `ok`, `degraded`, `unreachable`, `unknown` or `disabled`. It is
 derived from recent authenticated health checks; it is not user-controllable.
+`interfaces` is the Agent-reported interface list (empty when unavailable).
 
 ### 2.6 `POST /api/v1/resolve`
 
@@ -402,9 +415,15 @@ Body (strict JSON, <= 8 KiB):
   "protocol": "icmp",
   "max_hops": 30,
   "queries": 3,
-  "timeout_ms": 60000
+  "timeout_ms": 60000,
+  "node_interfaces": { "tokyo-1": "eth0" }
 }
 ```
+
+`node_interfaces` is optional: it maps selected node ids to an interface name
+advertised by that Agent (omit a node or use `""` for automatic routing). Keys
+must be selected nodes, and names must be present in the Controller's cached
+advertisement; otherwise the request is rejected with `400 invalid_request`.
 
 For `tcp`/`udp`, add `"port": 443` (or any bounded integer); the UI pre-fills
 NextTrace's conventional defaults (80/TCP, 33494/UDP) but the user may change
@@ -464,6 +483,7 @@ Job document:
       "duration_ms": 14800,
       "nexttrace_version": "v1.7.3",
       "parser_schema": "nexttrace.json.v1",
+      "interface": "eth0",
       "summary": { "hop_count": 12, "reached_destination": true, "destination_rtt_ms": 41.217, "replies": 30, "probes": 36 },
       "hops": [ /* as Agent trace response */ ],
       "error": null

@@ -40,7 +40,9 @@ const (
 	MaxJobIDLen          = 64
 	MaxNodeIDLen         = 32
 	MaxOriginalTargetLen = 253
-	MaxLabelRunes        = 128
+	// MaxInterfaceNameLen is the Linux IFNAMSIZ upper bound (15 visible bytes).
+	MaxInterfaceNameLen = 15
+	MaxLabelRunes       = 128
 
 	// MaxBatchNodes is the absolute number of Agents a single job may target.
 	MaxBatchNodes = 16
@@ -273,9 +275,24 @@ func NewError(code ErrorCode, message string) *APIError {
 }
 
 var (
-	jobIDPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{15,63}$`)
-	nodeIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+	jobIDPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{15,63}$`)
+	nodeIDPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+	interfacePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}$`)
 )
+
+// ValidateInterfaceName validates an Agent network-interface name before it is
+// used as a typed NextTrace argument. It is only a syntactic check: callers
+// must additionally verify that the name exists in the Agent's enumerated,
+// allowlisted interface set. Empty means "let NextTrace choose the route".
+func ValidateInterfaceName(name string) error {
+	if name == "" {
+		return nil
+	}
+	if len(name) > MaxInterfaceNameLen || !interfacePattern.MatchString(name) {
+		return NewError(ErrInvalidRequest, "invalid interface name")
+	}
+	return nil
+}
 
 // ValidateJobID checks the opaque job identifier carried across the Agent API.
 // TraceCat generates 32 lowercase hex characters, but the pattern is kept

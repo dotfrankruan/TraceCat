@@ -21,6 +21,10 @@ type AgentTraceRequest struct {
 	// Port is the destination port for tcp/udp probes and must be omitted for
 	// icmp. It is always a bounded integer validated by both sides.
 	Port *int `json:"port,omitempty"`
+	// Interface optionally selects one of the Agent's enumerated network
+	// interfaces (NextTrace -D/--dev). Empty means "automatic routing". The
+	// Agent revalidates the name against its own allowlisted interface set.
+	Interface string `json:"interface,omitempty"`
 }
 
 // NextTraceInfo describes the locally installed NextTrace binary as detected at
@@ -64,6 +68,7 @@ type AgentTraceResponse struct {
 	Family           IPFamily     `json:"family"`
 	Protocol         Protocol     `json:"protocol"`
 	Port             *int         `json:"port,omitempty"`
+	Interface        string       `json:"interface,omitempty"`
 	StartedAt        string       `json:"started_at"`
 	EndedAt          string       `json:"ended_at"`
 	DurationMS       int64        `json:"duration_ms"`
@@ -109,6 +114,9 @@ func (r *AgentTraceRequest) Validate() error {
 		return NewError(ErrInvalidRequest, "invalid protocol")
 	}
 	if err := ValidatePortForProtocol(r.Protocol, r.Port); err != nil {
+		return err
+	}
+	if err := ValidateInterfaceName(r.Interface); err != nil {
 		return err
 	}
 	return ValidateLimits(r.MaxHops, r.Queries, r.TimeoutMS)

@@ -53,7 +53,11 @@ type AgentHealth struct {
 	Version       string        `json:"version"`
 	NextTrace     NextTraceInfo `json:"nexttrace"`
 	Limits        AgentLimits   `json:"limits"`
-	Time          string        `json:"time"`
+	// Interfaces lists the Agent's selectable network interfaces (loopback,
+	// down, container/bridge and other virtual interfaces excluded). Empty when
+	// the installed binary cannot select a device.
+	Interfaces []string `json:"interfaces,omitempty"`
+	Time       string   `json:"time"`
 }
 
 // AgentTraceResponse is the response of POST /v1/trace. A trace that ran but

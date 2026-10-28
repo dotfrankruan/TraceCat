@@ -88,6 +88,9 @@ type NodeResult struct {
 	Location string     `json:"location,omitempty"`
 	Provider string     `json:"provider,omitempty"`
 	Status   NodeStatus `json:"status"`
+	// Interface is the source network interface selected for this node (empty
+	// means automatic routing).
+	Interface string `json:"interface,omitempty"`
 	// StartedAt and EndedAt are RFC3339Nano UTC timestamps; nil when the node
 	// has not entered that phase.
 	StartedAt        string        `json:"started_at,omitempty"`

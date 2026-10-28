@@ -28,6 +28,7 @@ Flags:
   -T, --tcp               use TCP SYN probes
   -U, --udp               use UDP probes
   -p, --port int          destination port (default 80)
+  -D, --dev <value>       use the specified source network device
   -j, --json              output JSON
   -m, --max-hops int      maximum hops (default 30)
   -q, --queries int       number of probes per hop (default 3)

@@ -53,8 +53,11 @@ func (c *Config) ListenAddr() (netip.Addr, uint16, error) {
 }
 
 // validateBindWith checks that the configured address is assigned to a local
-// interface and satisfies the Tailscale-only policy. Interface addresses are
-// caller-supplied so the rule can be unit tested without touching the host.
+// interface and satisfies the generic bind policy: loopback, RFC1918, CGNAT,
+// ULA, Tailscale and other non-public addresses are accepted; a globally
+// routable address requires security.allow_public_bind=true. Interface
+// addresses are caller-supplied so the rule can be unit tested without
+// touching the host.
 func (c *Config) validateBindWith(assigned []netip.Addr) error {
 	addr, _, err := parseListen(c.Listen)
 	if err != nil {
@@ -70,21 +73,11 @@ func (c *Config) validateBindWith(assigned []netip.Addr) error {
 	if !found {
 		return fmt.Errorf("listen address %s is not assigned to any local interface", addr)
 	}
-
-	tailscale := ipguard.IsTailscaleAddr(addr)
-	switch {
-	case c.Security.RequireTailscaleBind && !c.Security.AllowNonTailscaleBind:
-		if !tailscale {
-			return fmt.Errorf("listen address %s is not a Tailscale address; require_tailscale_bind is enabled", addr)
-		}
-	case !c.Security.RequireTailscaleBind:
-		// Explicit lab configuration: allow_non_tailscale_bind was already
-		// required to be true by Validate. Loopback or an assigned private
-		// address is acceptable, but a wildcard was rejected above and public
-		// addresses are refused even in lab mode.
-		if !tailscale && !ipguard.IsNonPublic(addr) {
-			return fmt.Errorf("listen address %s is public; only Tailscale, loopback or private lab addresses may be bound", addr)
-		}
+	if ipguard.IsNonPublic(addr) {
+		return nil
+	}
+	if !c.Security.AllowPublicBind {
+		return fmt.Errorf("listen address %s is globally routable; set security.allow_public_bind=true to bind a public address", addr)
 	}
 	return nil
 }

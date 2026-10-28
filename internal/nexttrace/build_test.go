@@ -55,6 +55,49 @@ func TestBuildArgsExactVectors(t *testing.T) {
 			want: []string{"-6", "--json", "-q", "3", "-m", "30", "--timeout", "1000", "2606:4700:4700::1111"},
 		},
 		{
+			name: "ipv4 icmp with source interface",
+			flags: Flags{
+				JSON: true, IPv4: true, IPv6: true,
+				MaxHopsShort: true, QueriesShort: true, Timeout: true,
+				DeviceShort: true,
+			},
+			spec: func() Spec {
+				spec := ipv4Spec()
+				spec.Interface = "eth0"
+				return spec
+			}(),
+			want: []string{"-4", "-D", "eth0", "--json", "-q", "3", "-m", "30", "--timeout", "1000", "1.1.1.1"},
+		},
+		{
+			name: "ipv4 tcp with source interface and traceroute",
+			flags: Flags{
+				JSON: true, IPv4: true, IPv6: true,
+				MaxHopsShort: true, QueriesShort: true, Timeout: true,
+				TCPShort: true, UDPShort: true, PortShort: true,
+				DeviceShort: true, Traceroute: true,
+			},
+			spec: func() Spec {
+				spec := tcpSpec()
+				spec.Interface = "eth0"
+				return spec
+			}(),
+			want: []string{"-4", "-T", "-D", "eth0", "--traceroute", "--json", "-q", "3", "-m", "30", "--timeout", "1000", "-p", "443", "1.1.1.1"},
+		},
+		{
+			name: "ipv6 udp with long device flag",
+			flags: Flags{
+				JSON: true, IPv4Long: true, IPv6Long: true,
+				MaxHopsLong: true, QueriesLong: true, Timeout: true,
+				UDPLong: true, PortLong: true, DeviceLong: true,
+			},
+			spec: Spec{
+				Addr: v6, Family: model.FamilyIPv6, Protocol: model.ProtocolUDP,
+				Port: intPtr(model.DefaultUDPPort), Interface: "eth0",
+				MaxHops: 16, Queries: 2, ProbeTimeoutMS: 500,
+			},
+			want: []string{"--ipv6", "--udp", "--dev", "eth0", "--json", "--queries", "2", "--max-hops", "16", "--timeout", "500", "--port", "33494", "2606:4700:4700::1111"},
+		},
+		{
 			name: "ipv4 tcp with destination port",
 			flags: Flags{
 				JSON: true, IPv4: true, IPv6: true,
@@ -202,6 +245,58 @@ func TestBuildArgsRejectsInvalidSpecs(t *testing.T) {
 
 	if _, err := (Capabilities{}).BuildArgs(valid); err == nil {
 		t.Fatal("BuildArgs with unavailable capabilities = nil error, want rejection")
+	}
+}
+
+func TestBuildArgsInterfaceRejections(t *testing.T) {
+	t.Parallel()
+
+	noDeviceCaps := Capabilities{Version: "v1.7.3", Flags: Flags{
+		JSON: true, IPv4: true, IPv6: true,
+		MaxHopsShort: true, QueriesShort: true, Timeout: true,
+	}}
+	withInterface := func(name string) Spec {
+		spec := ipv4Spec()
+		spec.Interface = name
+		return spec
+	}
+
+	t.Run("device selection unsupported", func(t *testing.T) {
+		t.Parallel()
+		if _, err := noDeviceCaps.BuildArgs(withInterface("eth0")); err == nil {
+			t.Fatal("BuildArgs = nil error without -D/--dev capability")
+		}
+	})
+
+	for name, iface := range map[string]string{
+		"path traversal":       "../../etc/passwd",
+		"shell metachar":       "eth0; touch /tmp/pwned",
+		"command substitution": "eth0$(id)",
+		"whitespace":           "eth 0",
+		"too long":             strings.Repeat("e", 16),
+		"invalid leading":      "-D",
+	} {
+		iface := iface
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := capableCapabilities().BuildArgs(withInterface(iface)); err == nil {
+				t.Fatalf("BuildArgs(interface=%q) = nil error, want rejection", iface)
+			}
+		})
+	}
+}
+
+func TestBuildArgsAutomaticRoutingHasNoDeviceFlag(t *testing.T) {
+	t.Parallel()
+	caps := capableCapabilities()
+	argv, err := caps.BuildArgs(ipv4Spec())
+	if err != nil {
+		t.Fatalf("BuildArgs: %v", err)
+	}
+	for _, arg := range argv {
+		if arg == "-D" || arg == "--dev" {
+			t.Fatalf("automatic routing argv contains a device flag: %v", argv)
+		}
 	}
 }
 

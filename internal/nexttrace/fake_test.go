@@ -170,6 +170,8 @@ func capableFlags() Flags {
 		UDPLong:      true,
 		PortShort:    true,
 		PortLong:     true,
+		DeviceShort:  true,
+		DeviceLong:   true,
 	}
 }
 

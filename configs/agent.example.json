@@ -18,8 +18,11 @@
   "security": {
     "allow_private_targets": false,
     "allowed_cidrs": [],
-    "require_tailscale_bind": true,
-    "allow_non_tailscale_bind": false
+    "allow_public_bind": false
+  },
+  "interfaces": {
+    "exclude": [],
+    "include": []
   },
   "rate_limit": {
     "requests_per_minute": 60,

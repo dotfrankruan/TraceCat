@@ -310,3 +310,19 @@ func TestParseFixtureRoundTripThroughFake(t *testing.T) {
 		t.Fatalf("fake did not record argv: %v", err)
 	}
 }
+
+func TestRunExecutesInterfaceArgv(t *testing.T) {
+	fake := newFake(t, fakeControl{Stdout: groupedFixture})
+	runner := NewRunner(fake, capableCapabilities())
+
+	spec := ipv4Spec()
+	spec.Interface = "eth0"
+	if _, apiErr := runner.Run(context.Background(), spec, 5*time.Second, RunLimits{}); apiErr != nil {
+		t.Fatalf("Run: %v", apiErr)
+	}
+	record := readRecord(t, fake+".args")
+	want := []string{"-4", "-D", "eth0", "--traceroute", "--json", "-q", "3", "-m", "30", "--timeout", "1000", "1.1.1.1"}
+	if strings.Join(record.Args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("argv = %v, want %v", record.Args, want)
+	}
+}

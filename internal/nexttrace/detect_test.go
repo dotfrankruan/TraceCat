@@ -42,19 +42,21 @@ func TestParseFlags(t *testing.T) {
 	t.Parallel()
 	full := parseFlags(defaultHelpForTest)
 	for name, got := range map[string]bool{
-		"json":       full.JSON,
-		"ipv4":       full.IPv4,
-		"ipv6":       full.IPv6,
-		"max_hops":   full.MaxHopsShort && full.MaxHopsLong,
-		"queries":    full.QueriesShort && full.QueriesLong,
-		"timeout":    full.Timeout,
-		"traceroute": full.Traceroute,
-		"tcp_short":  full.TCPShort,
-		"tcp_long":   full.TCPLong,
-		"udp_short":  full.UDPShort,
-		"udp_long":   full.UDPLong,
-		"port_short": full.PortShort,
-		"port_long":  full.PortLong,
+		"json":         full.JSON,
+		"ipv4":         full.IPv4,
+		"ipv6":         full.IPv6,
+		"max_hops":     full.MaxHopsShort && full.MaxHopsLong,
+		"queries":      full.QueriesShort && full.QueriesLong,
+		"timeout":      full.Timeout,
+		"traceroute":   full.Traceroute,
+		"tcp_short":    full.TCPShort,
+		"tcp_long":     full.TCPLong,
+		"udp_short":    full.UDPShort,
+		"udp_long":     full.UDPLong,
+		"port_short":   full.PortShort,
+		"port_long":    full.PortLong,
+		"device_short": full.DeviceShort,
+		"device_long":  full.DeviceLong,
 	} {
 		if !got {
 			t.Errorf("flag %s not detected in full help output", name)
@@ -71,6 +73,7 @@ func TestParseFlags(t *testing.T) {
   -T, --tcp               use TCP SYN probes
   -U, --udp               use UDP probes
   -p, --port int          destination port (default 80)
+  -D, --dev <value>       use the specified source network device
   -j, --json              output JSON
   -m, --max-hops int      maximum hops (default 30)
   -q, --queries int       number of probes per hop (default 3)
@@ -128,6 +131,7 @@ Arguments:
                                      on unstable paths for a steadier view.
                                      Default: 3
   -j  --json                         Output trace results as JSON
+  -D  --dev <value>                  Use the specified source device
   -C  --no-color                     Disable Colorful Output (traceroute mode
                                      is implied; --traceroute is not a flag)
       --timeout                      Per-probe timeout [ms]. Default: 1000
@@ -178,6 +182,7 @@ Flags:
   -T, --tcp               use TCP SYN probes
   -U, --udp               use UDP probes
   -p, --port int          destination port (default 80)
+  -D, --dev <value>       use the specified source network device
   -j, --json              output JSON
   -m, --max-hops int      maximum hops (default 30)
   -q, --queries int       number of probes per hop (default 3)
@@ -201,6 +206,7 @@ func TestParseFlagsRealNextTraceV173Format(t *testing.T) {
   -p  --port                         Set the destination port to use. With
                                      default of 80 for "tcp", 33494 for "udp"
   -j  --json                         Output trace results as JSON
+  -D  --dev <value>                  Use the specified source device
   -q  --queries                      Latency samples per hop.
                                      Default: 3
   -m  --max-hops                     Set the max number of hops. Default: 30
@@ -232,6 +238,12 @@ func TestParseFlagsRealNextTraceV173Format(t *testing.T) {
 	if !caps.SupportsProtocol(model.ProtocolTCP) || !caps.SupportsProtocol(model.ProtocolUDP) {
 		t.Fatal("real v1.7.3 layout should support TCP and UDP")
 	}
+	if !caps.SupportsDeviceSelection() {
+		t.Fatal("real v1.7.3 layout should support source-device selection")
+	}
+	if flag, ok := caps.Flags.deviceFlag(); !ok || flag != "-D" {
+		t.Fatalf("deviceFlag = %q, %v; want -D", flag, ok)
+	}
 	if flag, ok := caps.Flags.tcpFlag(); !ok || flag != "-T" {
 		t.Fatalf("tcpFlag = %q, %v; want -T", flag, ok)
 	}
@@ -254,7 +266,7 @@ func TestDetectFakeBinary(t *testing.T) {
 		t.Fatalf("version = %q, want v1.7.1", caps.Version)
 	}
 	wantCaps := []string{
-		CapabilityIPv4, CapabilityIPv6, CapabilityJSON,
+		CapabilityDevice, CapabilityIPv4, CapabilityIPv6, CapabilityJSON,
 		CapabilityMaxHops, CapabilityPort, CapabilityQueries,
 		CapabilityTCP, CapabilityTimeout, CapabilityTraceroute, CapabilityUDP,
 	}
@@ -341,6 +353,62 @@ func TestDetectOptionalProtocolCapabilities(t *testing.T) {
 		}
 		if flag, ok := caps.Flags.portFlag(); !ok || flag != "--port" {
 			t.Fatalf("portFlag = %q, %v", flag, ok)
+		}
+	})
+}
+
+func TestDetectDeviceCapability(t *testing.T) {
+	t.Parallel()
+	baseHelp := `Flags:
+  -4, --ipv4
+  -6, --ipv6
+  -j, --json
+  -m, --max-hops int
+  -q, --queries int
+`
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		fake := newFake(t, fakeControl{Help: baseHelp})
+		caps, apiErr := Detect(context.Background(), fake)
+		if apiErr != nil {
+			t.Fatalf("Detect: %v", apiErr)
+		}
+		if caps.SupportsDeviceSelection() {
+			t.Fatal("device selection must not be reported without -D/--dev")
+		}
+		if containsString(caps.CapabilityNames(), CapabilityDevice) {
+			t.Fatalf("capabilities %v unexpectedly include device", caps.CapabilityNames())
+		}
+	})
+	t.Run("short", func(t *testing.T) {
+		t.Parallel()
+		fake := newFake(t, fakeControl{Help: baseHelp + "  -D, --dev <value>\n"})
+		caps, apiErr := Detect(context.Background(), fake)
+		if apiErr != nil {
+			t.Fatalf("Detect: %v", apiErr)
+		}
+		if !caps.SupportsDeviceSelection() {
+			t.Fatal("short -D must enable device selection")
+		}
+		if flag, _ := caps.Flags.deviceFlag(); flag != "-D" {
+			t.Fatalf("deviceFlag = %q, want -D", flag)
+		}
+		if !containsString(caps.CapabilityNames(), CapabilityDevice) {
+			t.Fatalf("capabilities %v missing device", caps.CapabilityNames())
+		}
+	})
+	t.Run("long only", func(t *testing.T) {
+		t.Parallel()
+		fake := newFake(t, fakeControl{Help: baseHelp + "  --dev <value>\n"})
+		caps, apiErr := Detect(context.Background(), fake)
+		if apiErr != nil {
+			t.Fatalf("Detect: %v", apiErr)
+		}
+		if !caps.SupportsDeviceSelection() {
+			t.Fatal("long --dev must enable device selection")
+		}
+		if flag, _ := caps.Flags.deviceFlag(); flag != "--dev" {
+			t.Fatalf("deviceFlag = %q, want --dev", flag)
 		}
 	})
 }

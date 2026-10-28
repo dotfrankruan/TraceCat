@@ -11,7 +11,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/dotfrankruan/tracecat/internal/ipguard"
@@ -28,6 +30,23 @@ const (
 	idleTimeout         = 60 * time.Second
 	shutdownGracePeriod = 15 * time.Second
 )
+
+// InterfaceLister returns the currently eligible source-interface names.
+// Implementations must be safe for concurrent use.
+type InterfaceLister func() ([]string, error)
+
+// Option customizes Agent construction.
+type Option func(*Agent)
+
+// WithInterfaceLister overrides interface enumeration. It is intended for
+// tests and embedders that must not depend on the host's real interfaces.
+func WithInterfaceLister(lister InterfaceLister) Option {
+	return func(a *Agent) {
+		if lister != nil {
+			a.interfaceLister = lister
+		}
+	}
+}
 
 // Agent is the TraceCat Agent HTTP service.
 type Agent struct {
@@ -46,6 +65,10 @@ type Agent struct {
 	traceSem  chan struct{}
 	protocols []model.Protocol
 
+	interfaceLister InterfaceLister
+	interfaceMu     sync.Mutex
+	interfaces      []string
+
 	handler http.Handler
 	baseCtx context.Context
 	cancel  context.CancelFunc
@@ -54,7 +77,7 @@ type Agent struct {
 // New validates cfg, detects the installed NextTrace binary and prepares the
 // HTTP service. An unusable NextTrace binary does not prevent startup: the
 // Agent starts in a degraded state so /v1/health can report the problem.
-func New(cfg Config, logger *slog.Logger) (*Agent, error) {
+func New(cfg Config, logger *slog.Logger, opts ...Option) (*Agent, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -63,6 +86,10 @@ func New(cfg Config, logger *slog.Logger) (*Agent, error) {
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
+	}
+	if listenAddr, _, err := cfg.ListenAddr(); err == nil && !ipguard.IsNonPublic(listenAddr) {
+		logger.Warn("listening on a publicly routable address because security.allow_public_bind=true",
+			"listen", listenAddr.String())
 	}
 	token, ok := os.LookupEnv(cfg.Auth.TokenEnv)
 	if !ok || len(token) < minTokenLength {
@@ -84,6 +111,14 @@ func New(cfg Config, logger *slog.Logger) (*Agent, error) {
 		traceSem: make(chan struct{}, cfg.NextTrace.MaxConcurrentTraces),
 		baseCtx:  ctx,
 		cancel:   cancel,
+		interfaceLister: func() ([]string, error) {
+			return enumerateInterfaces(cfg.Interfaces, systemInterfaceSource)
+		},
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(agent)
+		}
 	}
 
 	caps, detectErr := nexttrace.Detect(context.Background(), cfg.NextTrace.Binary)
@@ -120,6 +155,17 @@ func New(cfg Config, logger *slog.Logger) (*Agent, error) {
 		MaxTimeoutMS:        cfg.NextTrace.MaxExecutionMS,
 		MaxConcurrentTraces: cfg.NextTrace.MaxConcurrentTraces,
 		Protocols:           model.ProtocolNames(agent.protocols),
+	}
+	if caps.SupportsDeviceSelection() {
+		names, enumErr := agent.interfaceLister()
+		if enumErr != nil {
+			cancel()
+			return nil, fmt.Errorf("enumerating network interfaces: %w", enumErr)
+		}
+		sorted := append([]string{}, names...)
+		sort.Strings(sorted)
+		agent.interfaces = sorted
+		logger.Info("source interfaces enumerated", "interfaces", sorted)
 	}
 	agent.handler = http.HandlerFunc(agent.serveHTTP)
 	return agent, nil
@@ -283,6 +329,7 @@ func (a *Agent) handleHealth(w http.ResponseWriter) {
 		Version:       version.Version,
 		NextTrace:     a.info,
 		Limits:        a.limits,
+		Interfaces:    a.currentInterfaces(),
 		Time:          formatTimestamp(time.Now()),
 	}
 	writeJSON(w, http.StatusOK, health)
@@ -327,6 +374,22 @@ func (a *Agent) handleTrace(w http.ResponseWriter, r *http.Request) {
 	if req.NodeID != a.cfg.NodeID {
 		writeError(w, http.StatusForbidden, model.ErrForbidden, "node_id does not match this Agent")
 		return
+	}
+	if req.Interface != "" {
+		if !a.caps.SupportsDeviceSelection() {
+			writeError(w, http.StatusBadRequest, model.ErrInvalidRequest, "interface selection is not supported by the installed nexttrace")
+			return
+		}
+		available, err := a.interfaceAvailable(req.Interface)
+		if err != nil {
+			a.logger.Warn("interface enumeration failed while validating a trace request", "error", err)
+			writeError(w, http.StatusInternalServerError, model.ErrInternal, "interface enumeration failed")
+			return
+		}
+		if !available {
+			writeError(w, http.StatusBadRequest, model.ErrInvalidRequest, "interface is not available on this Agent")
+			return
+		}
 	}
 
 	target, err := ipguard.NormalizeIP(req.TargetIP)
@@ -384,6 +447,7 @@ func (a *Agent) handleTrace(w http.ResponseWriter, r *http.Request) {
 		Family:             req.Family,
 		Protocol:           req.Protocol,
 		Port:               req.Port,
+		Interface:          req.Interface,
 		StartedAt:          formatTimestamp(started),
 		EndedAt:            formatTimestamp(ended),
 		DurationMS:         ended.Sub(started).Milliseconds(),
@@ -407,6 +471,9 @@ func (a *Agent) handleTrace(w http.ResponseWriter, r *http.Request) {
 	if req.Port != nil {
 		attrs = append(attrs, "port", *req.Port)
 	}
+	if req.Interface != "" {
+		attrs = append(attrs, "interface", req.Interface)
+	}
 	if outcome.err != nil {
 		attrs = append(attrs, "error_code", outcome.err.Code)
 	}
@@ -425,6 +492,46 @@ func (a *Agent) acquireTrace() bool {
 }
 
 func (a *Agent) releaseTrace() { <-a.traceSem }
+
+// currentInterfaces returns a fresh interface snapshot for /v1/health. When the
+// binary cannot select a device the list is always empty. Enumeration failures
+// fall back to the last successful snapshot.
+func (a *Agent) currentInterfaces() []string {
+	if !a.caps.SupportsDeviceSelection() {
+		return nil
+	}
+	names, err := a.interfaceLister()
+	if err != nil {
+		a.logger.Warn("interface enumeration failed; using last snapshot", "error", err)
+		return a.interfaceSnapshot()
+	}
+	sorted := append([]string{}, names...)
+	sort.Strings(sorted)
+	a.interfaceMu.Lock()
+	a.interfaces = sorted
+	a.interfaceMu.Unlock()
+	return append([]string{}, sorted...)
+}
+
+func (a *Agent) interfaceSnapshot() []string {
+	a.interfaceMu.Lock()
+	defer a.interfaceMu.Unlock()
+	return append([]string{}, a.interfaces...)
+}
+
+// interfaceAvailable reports whether name is in the live eligible set.
+func (a *Agent) interfaceAvailable(name string) (bool, error) {
+	names, err := a.interfaceLister()
+	if err != nil {
+		return false, err
+	}
+	for _, candidate := range names {
+		if candidate == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 // protocolEnabled reports whether protocol is in the Agent's effective
 // protocol list (configured allowlist intersected with binary capabilities).

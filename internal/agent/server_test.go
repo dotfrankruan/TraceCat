@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -53,7 +54,7 @@ func TestHealth(t *testing.T) {
 	if !health.NextTrace.Available || health.NextTrace.Version != "v1.7.1" {
 		t.Fatalf("nexttrace = %+v", health.NextTrace)
 	}
-	for _, capability := range []string{"json", "ipv4", "ipv6", "max_hops", "queries", "timeout", "tcp", "udp", "port"} {
+	for _, capability := range []string{"json", "ipv4", "ipv6", "max_hops", "queries", "timeout", "tcp", "udp", "port", "device"} {
 		if !containsString(health.NextTrace.Capabilities, capability) {
 			t.Fatalf("capabilities %v missing %q", health.NextTrace.Capabilities, capability)
 		}
@@ -208,6 +209,9 @@ func TestTraceSuccess(t *testing.T) {
 	}
 	if strings.Contains(body, `"port"`) {
 		t.Fatalf("ICMP response must omit port: %s", body)
+	}
+	if strings.Contains(body, `"interface"`) {
+		t.Fatalf("automatic-routing response must omit interface: %s", body)
 	}
 }
 
@@ -753,6 +757,186 @@ func TestTraceProtocolAllowlistAndCapabilities(t *testing.T) {
 		}
 		if _, err := os.Stat(fake + ".args"); err == nil {
 			t.Fatal("nexttrace was executed despite being unusable")
+		}
+	})
+}
+
+func TestHealthInterfaces(t *testing.T) {
+	t.Run("lists sorted and refreshes", func(t *testing.T) {
+		names := []string{"eth1", "eth0"}
+		lister := func() ([]string, error) {
+			return append([]string{}, names...), nil
+		}
+		agent, _ := newTestAgentWithConfig(t, fakeControl{}, nil, WithInterfaceLister(lister))
+
+		readHealth := func() model.AgentHealth {
+			t.Helper()
+			rec := doRequest(t, agent.Handler(), http.MethodGet, "/v1/health", nil, requestOptions{})
+			if rec.Code != http.StatusOK {
+				t.Fatalf("health status = %d", rec.Code)
+			}
+			var health model.AgentHealth
+			if err := json.Unmarshal(rec.Body.Bytes(), &health); err != nil {
+				t.Fatalf("decoding health: %v", err)
+			}
+			return health
+		}
+
+		if got := readHealth().Interfaces; strings.Join(got, ",") != "eth0,eth1" {
+			t.Fatalf("health interfaces = %v, want sorted [eth0 eth1]", got)
+		}
+		names = append(names, "eth2")
+		if got := readHealth().Interfaces; strings.Join(got, ",") != "eth0,eth1,eth2" {
+			t.Fatalf("refreshed health interfaces = %v, want [eth0 eth1 eth2]", got)
+		}
+	})
+
+	t.Run("falls back to startup snapshot on refresh failure", func(t *testing.T) {
+		fail := false
+		lister := func() ([]string, error) {
+			if fail {
+				return nil, errors.New("enumeration failed")
+			}
+			return []string{"eth0"}, nil
+		}
+		agent, _ := newTestAgentWithConfig(t, fakeControl{}, nil, WithInterfaceLister(lister))
+		fail = true
+		rec := doRequest(t, agent.Handler(), http.MethodGet, "/v1/health", nil, requestOptions{})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("health status = %d, want 200", rec.Code)
+		}
+		var health model.AgentHealth
+		if err := json.Unmarshal(rec.Body.Bytes(), &health); err != nil {
+			t.Fatalf("decoding health: %v", err)
+		}
+		if strings.Join(health.Interfaces, ",") != "eth0" {
+			t.Fatalf("health interfaces = %v, want startup snapshot [eth0]", health.Interfaces)
+		}
+	})
+
+	t.Run("empty when device selection unsupported", func(t *testing.T) {
+		agent, _ := newTestAgentWithConfig(t, fakeControl{Help: icmpOnlyHelp}, nil,
+			WithInterfaceLister(staticInterfaceLister("eth0")))
+		rec := doRequest(t, agent.Handler(), http.MethodGet, "/v1/health", nil, requestOptions{})
+		var health model.AgentHealth
+		if err := json.Unmarshal(rec.Body.Bytes(), &health); err != nil {
+			t.Fatalf("decoding health: %v", err)
+		}
+		if len(health.Interfaces) != 0 {
+			t.Fatalf("health interfaces = %v, want empty without -D capability", health.Interfaces)
+		}
+	})
+}
+
+func TestTraceInterfaceSelection(t *testing.T) {
+	t.Run("icmp interface echo and argv", func(t *testing.T) {
+		agent, fake := newTestAgentWithConfig(t, fakeControl{Stdout: successTraceJSON}, nil,
+			WithInterfaceLister(staticInterfaceLister("eth0", "eth1")))
+		rec := doRequest(t, agent.Handler(), http.MethodPost, "/v1/trace",
+			traceRequestJSON(map[string]any{"interface": "eth1"}), requestOptions{})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		response := decodeTraceResponse(t, rec)
+		if response.Status != model.NodeCompleted || response.Interface != "eth1" {
+			t.Fatalf("response = status %s interface %q", response.Status, response.Interface)
+		}
+		want := []string{"-4", "-D", "eth1", "--traceroute", "--json", "-q", "3", "-m", "30", "--timeout", "1000", "1.1.1.1"}
+		if got := readFakeArgs(t, fake); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("argv = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("tcp interface argv", func(t *testing.T) {
+		agent, fake := newTestAgentWithConfig(t, fakeControl{Stdout: successTraceJSON}, nil,
+			WithInterfaceLister(staticInterfaceLister("eth0")))
+		rec := doRequest(t, agent.Handler(), http.MethodPost, "/v1/trace",
+			traceRequestJSON(map[string]any{"protocol": "tcp", "port": 443, "interface": "eth0"}), requestOptions{})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		want := []string{"-4", "-T", "-D", "eth0", "--traceroute", "--json", "-q", "3", "-m", "30", "--timeout", "1000", "-p", "443", "1.1.1.1"}
+		if got := readFakeArgs(t, fake); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("argv = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("ipv6 interface argv", func(t *testing.T) {
+		agent, fake := newTestAgentWithConfig(t, fakeControl{Stdout: successTraceJSON}, nil,
+			WithInterfaceLister(staticInterfaceLister("eth0")))
+		rec := doRequest(t, agent.Handler(), http.MethodPost, "/v1/trace",
+			traceRequestJSON(map[string]any{
+				"target_ip": "2606:4700:4700::1111", "family": "ipv6", "interface": "eth0",
+			}), requestOptions{})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		want := []string{"-6", "-D", "eth0", "--traceroute", "--json", "-q", "3", "-m", "30", "--timeout", "1000", "2606:4700:4700::1111"}
+		if got := readFakeArgs(t, fake); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("argv = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("interface not in enumerated set", func(t *testing.T) {
+		agent, fake := newTestAgentWithConfig(t, fakeControl{Stdout: successTraceJSON}, nil,
+			WithInterfaceLister(staticInterfaceLister("eth0")))
+		rec := doRequest(t, agent.Handler(), http.MethodPost, "/v1/trace",
+			traceRequestJSON(map[string]any{"interface": "eth9"}), requestOptions{})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+		}
+		if envelope := decodeAPIError(t, rec); envelope.Error.Code != model.ErrInvalidRequest {
+			t.Fatalf("error = %s, want invalid_request", envelope.Error.Code)
+		}
+		if _, err := os.Stat(fake + ".args"); err == nil {
+			t.Fatal("nexttrace was executed for an unavailable interface")
+		}
+	})
+
+	t.Run("malformed interface name rejected before execution", func(t *testing.T) {
+		agent, fake := newTestAgentWithConfig(t, fakeControl{Stdout: successTraceJSON}, nil,
+			WithInterfaceLister(staticInterfaceLister("eth0")))
+		rec := doRequest(t, agent.Handler(), http.MethodPost, "/v1/trace",
+			traceRequestJSON(map[string]any{"interface": "../../etc/passwd"}), requestOptions{})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+		}
+		if _, err := os.Stat(fake + ".args"); err == nil {
+			t.Fatal("nexttrace was executed for a malformed interface name")
+		}
+	})
+
+	t.Run("device selection unsupported by binary", func(t *testing.T) {
+		agent, fake := newTestAgentWithConfig(t, fakeControl{Help: icmpOnlyHelp, Stdout: successTraceJSON}, nil,
+			WithInterfaceLister(staticInterfaceLister("eth0")))
+		rec := doRequest(t, agent.Handler(), http.MethodPost, "/v1/trace",
+			traceRequestJSON(map[string]any{"interface": "eth0"}), requestOptions{})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+		}
+		if _, err := os.Stat(fake + ".args"); err == nil {
+			t.Fatal("nexttrace was executed without device-selection capability")
+		}
+	})
+
+	t.Run("interface enumeration failure", func(t *testing.T) {
+		fail := false
+		lister := func() ([]string, error) {
+			if fail {
+				return nil, errors.New("enumeration failed")
+			}
+			return []string{"eth0"}, nil
+		}
+		agent, fake := newTestAgentWithConfig(t, fakeControl{Stdout: successTraceJSON}, nil,
+			WithInterfaceLister(lister))
+		fail = true
+		rec := doRequest(t, agent.Handler(), http.MethodPost, "/v1/trace",
+			traceRequestJSON(map[string]any{"interface": "eth0"}), requestOptions{})
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500: %s", rec.Code, rec.Body.String())
+		}
+		if _, err := os.Stat(fake + ".args"); err == nil {
+			t.Fatal("nexttrace was executed despite an interface enumeration failure")
 		}
 	})
 }

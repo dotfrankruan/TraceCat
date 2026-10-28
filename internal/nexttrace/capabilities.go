@@ -47,6 +47,7 @@ const (
 	CapabilityTCP        = "tcp"
 	CapabilityUDP        = "udp"
 	CapabilityPort       = "port"
+	CapabilityDevice     = "device"
 )
 
 // Flags records which command-line flags were actually observed in the
@@ -79,6 +80,12 @@ type Flags struct {
 	UDPLong   bool
 	PortShort bool
 	PortLong  bool
+
+	// DeviceShort/DeviceLong describe NextTrace's source-device selector
+	// (-D/--dev). It is optional; when absent the Agent advertises no
+	// selectable interfaces.
+	DeviceShort bool
+	DeviceLong  bool
 }
 
 func (f Flags) familyFlag(family model.IPFamily) (string, bool) {
@@ -139,6 +146,17 @@ func (f Flags) portFlag() (string, bool) {
 		return "-p", true
 	case f.PortLong:
 		return "--port", true
+	default:
+		return "", false
+	}
+}
+
+func (f Flags) deviceFlag() (string, bool) {
+	switch {
+	case f.DeviceShort:
+		return "-D", true
+	case f.DeviceLong:
+		return "--dev", true
 	default:
 		return "", false
 	}
@@ -216,6 +234,16 @@ func (c Capabilities) SupportsProtocol(protocol model.Protocol) bool {
 
 // SupportedProtocols returns the protocols the binary itself can execute, in
 // the canonical icmp/tcp/udp order.
+// SupportsDeviceSelection reports whether the binary exposes a source-device
+// selector (-D/--dev) and is otherwise usable.
+func (c Capabilities) SupportsDeviceSelection() bool {
+	if !c.Available() {
+		return false
+	}
+	_, ok := c.Flags.deviceFlag()
+	return ok
+}
+
 func (c Capabilities) SupportedProtocols() []model.Protocol {
 	protocols := make([]model.Protocol, 0, 3)
 	for _, protocol := range []model.Protocol{model.ProtocolICMP, model.ProtocolTCP, model.ProtocolUDP} {
@@ -260,6 +288,9 @@ func (c Capabilities) CapabilityNames() []string {
 	}
 	if _, ok := c.Flags.portFlag(); ok {
 		names = append(names, CapabilityPort)
+	}
+	if _, ok := c.Flags.deviceFlag(); ok {
+		names = append(names, CapabilityDevice)
 	}
 	sort.Strings(names)
 	return names
@@ -355,6 +386,8 @@ func parseFlags(help string) Flags {
 		UDPLong:      found["--udp"],
 		PortShort:    found["-p"],
 		PortLong:     found["--port"],
+		DeviceShort:  found["-D"],
+		DeviceLong:   found["--dev"],
 	}
 }
 

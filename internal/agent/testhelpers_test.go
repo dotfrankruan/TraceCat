@@ -103,10 +103,7 @@ func testConfig(fake string) Config {
 		Listen:    "127.0.0.1:9481",
 		Auth:      AuthConfig{TokenEnv: testTokenEnv},
 		NextTrace: NextTraceConfig{Binary: fake},
-		Security: SecurityConfig{
-			RequireTailscaleBind:  false,
-			AllowNonTailscaleBind: true,
-		},
+		Security:  SecurityConfig{},
 	}
 }
 
@@ -115,7 +112,7 @@ func newTestAgent(t *testing.T, ctrl fakeControl) (*Agent, string) {
 	return newTestAgentWithConfig(t, ctrl, nil)
 }
 
-func newTestAgentWithConfig(t *testing.T, ctrl fakeControl, mutate func(*Config)) (*Agent, string) {
+func newTestAgentWithConfig(t *testing.T, ctrl fakeControl, mutate func(*Config), opts ...Option) (*Agent, string) {
 	t.Helper()
 	fake := newFakeNexttrace(t, ctrl)
 	t.Setenv(testTokenEnv, testToken)
@@ -124,7 +121,7 @@ func newTestAgentWithConfig(t *testing.T, ctrl fakeControl, mutate func(*Config)
 		mutate(&cfg)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	agent, err := New(cfg, logger)
+	agent, err := New(cfg, logger, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -313,4 +310,12 @@ func containsString(haystack []string, needle string) bool {
 
 func hasControlChars(value string) bool {
 	return strings.IndexFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0
+}
+
+// staticInterfaceLister returns a fixed interface set for tests.
+func staticInterfaceLister(names ...string) InterfaceLister {
+	snapshot := append([]string{}, names...)
+	return func() ([]string, error) {
+		return append([]string{}, snapshot...), nil
+	}
 }

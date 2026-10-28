@@ -21,8 +21,7 @@ func baseConfigMap(fake string) map[string]any {
 			"binary": fake,
 		},
 		"security": map[string]any{
-			"require_tailscale_bind":   false,
-			"allow_non_tailscale_bind": true,
+			"allow_public_bind": false,
 		},
 	}
 }
@@ -100,25 +99,26 @@ func TestLoadValidConfigAppliesDefaults(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Fatalf("log_level = %q, want info", cfg.LogLevel)
 	}
-	if cfg.Security.RequireTailscaleBind {
-		t.Fatal("explicit require_tailscale_bind=false was not honoured")
+	if cfg.Security.AllowPublicBind {
+		t.Fatal("allow_public_bind = true, want false by default")
 	}
-	if !cfg.Security.AllowNonTailscaleBind {
-		t.Fatal("allow_non_tailscale_bind = false, want true")
+	if len(cfg.Interfaces.Exclude) != 0 || len(cfg.Interfaces.Include) != 0 {
+		t.Fatalf("interfaces default = %+v, want empty", cfg.Interfaces)
 	}
 }
 
-func TestLoadRequiresTailscaleBindByDefault(t *testing.T) {
+func TestLoadAllowsLoopbackAndPrivateBindByDefault(t *testing.T) {
 	fake := newFakeNexttrace(t, fakeControl{})
 	t.Setenv(testTokenEnv, testToken)
+
 	value := baseConfigMap(fake)
-	value["security"] = map[string]any{} // no bind switches
-	_, err := Load(writeConfigFile(t, value))
-	if err == nil {
-		t.Fatal("Load = nil error; default Tailscale-only binding must reject a loopback listener")
+	value["security"] = map[string]any{"allow_public_bind": false}
+	cfg, err := Load(writeConfigFile(t, value))
+	if err != nil {
+		t.Fatalf("Load with loopback bind: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "tailscale") {
-		t.Fatalf("error %q should mention the Tailscale requirement", err)
+	if cfg.Security.AllowPublicBind {
+		t.Fatal("allow_public_bind = true, want false")
 	}
 }
 
@@ -178,6 +178,27 @@ func TestLoadAllowedProtocols(t *testing.T) {
 	})
 }
 
+func TestLoadAcceptsInterfacesConfig(t *testing.T) {
+	fake := newFakeNexttrace(t, fakeControl{})
+	t.Setenv(testTokenEnv, testToken)
+
+	cfg, err := loadConfigWith(t, fake, func(m map[string]any) {
+		m["interfaces"] = map[string]any{
+			"exclude": []string{"ens*", "br-*"},
+			"include": []string{"eth1"},
+		}
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if strings.Join(cfg.Interfaces.Exclude, ",") != "ens*,br-*" {
+		t.Fatalf("interfaces.exclude = %v", cfg.Interfaces.Exclude)
+	}
+	if strings.Join(cfg.Interfaces.Include, ",") != "eth1" {
+		t.Fatalf("interfaces.include = %v", cfg.Interfaces.Include)
+	}
+}
+
 func TestLoadRejectsUnknownAndTrailingData(t *testing.T) {
 	fake := newFakeNexttrace(t, fakeControl{})
 	t.Setenv(testTokenEnv, testToken)
@@ -190,7 +211,7 @@ func TestLoadRejectsUnknownAndTrailingData(t *testing.T) {
 	})
 	t.Run("unknown nested field", func(t *testing.T) {
 		_, err := loadConfigWith(t, fake, func(m map[string]any) {
-			m["security"] = map[string]any{"require_tailscale_bind": false, "allow_non_tailscale_bind": true, "bogus": 1}
+			m["security"] = map[string]any{"allow_public_bind": false, "bogus": 1}
 		})
 		if err == nil || !strings.Contains(err.Error(), "unknown field") {
 			t.Fatalf("Load error = %v, want unknown field rejection", err)
@@ -329,12 +350,27 @@ func TestLoadRejectsOutOfRangeSettings(t *testing.T) {
 		},
 		"default route allowlist": func(m map[string]any) {
 			m["security"] = map[string]any{
-				"require_tailscale_bind": false, "allow_non_tailscale_bind": true,
-				"allowed_cidrs": []string{"0.0.0.0/0"},
+				"allow_public_bind": false,
+				"allowed_cidrs":     []string{"0.0.0.0/0"},
 			}
 		},
-		"require tailscale without lab switch": func(m map[string]any) {
-			m["security"] = map[string]any{"require_tailscale_bind": false}
+		"invalid exclude pattern": func(m map[string]any) {
+			m["interfaces"] = map[string]any{"exclude": []string{"bad pattern!"}}
+		},
+		"duplicate exclude pattern": func(m map[string]any) {
+			m["interfaces"] = map[string]any{"exclude": []string{"docker*", "docker*"}}
+		},
+		"invalid include interface": func(m map[string]any) {
+			m["interfaces"] = map[string]any{"include": []string{"bad name"}}
+		},
+		"empty include interface": func(m map[string]any) {
+			m["interfaces"] = map[string]any{"include": []string{""}}
+		},
+		"duplicate include interface": func(m map[string]any) {
+			m["interfaces"] = map[string]any{"include": []string{"eth0", "eth0"}}
+		},
+		"too long include interface": func(m map[string]any) {
+			m["interfaces"] = map[string]any{"include": []string{strings.Repeat("e", 16)}}
 		},
 		"bad rate limit": func(m map[string]any) {
 			m["rate_limit"] = map[string]any{"requests_per_minute": 7000}
@@ -356,33 +392,33 @@ func TestValidateBindWithInjectedInterfaces(t *testing.T) {
 	t.Setenv(testTokenEnv, testToken)
 
 	loopback := mustParseAddr(t, "127.0.0.1")
+	private := mustParseAddr(t, "192.168.50.10")
 	tailscale := mustParseAddr(t, "100.64.0.5")
+	ula := mustParseAddr(t, "fd7a:115c:a1e0::1")
+	public := mustParseAddr(t, "1.1.1.1")
 
 	cases := []struct {
 		name        string
 		listen      string
-		require     bool
-		allowNonTS  bool
+		allowPublic bool
 		assigned    []netip.Addr
 		wantErrPart string
 	}{
+		{name: "loopback accepted", listen: "127.0.0.1:9481", assigned: []netip.Addr{loopback}},
+		{name: "rfc1918 accepted", listen: "192.168.50.10:9481", assigned: []netip.Addr{private}},
+		{name: "tailscale cgnat accepted", listen: "100.64.0.5:9481", assigned: []netip.Addr{tailscale}},
+		{name: "ula accepted", listen: "[fd7a:115c:a1e0::1]:9481", assigned: []netip.Addr{ula}},
 		{
-			name: "assigned loopback in lab mode", listen: "127.0.0.1:9481",
-			require: false, allowNonTS: true, assigned: []netip.Addr{loopback},
+			name: "public rejected by default", listen: "1.1.1.1:9481",
+			assigned: []netip.Addr{public}, wantErrPart: "allow_public_bind",
 		},
 		{
-			name: "tailscale address satisfies requirement", listen: "100.64.0.5:9481",
-			require: true, allowNonTS: false, assigned: []netip.Addr{tailscale},
+			name: "public accepted with opt-in", listen: "1.1.1.1:9481",
+			allowPublic: true, assigned: []netip.Addr{public},
 		},
 		{
-			name: "loopback fails tailscale requirement", listen: "127.0.0.1:9481",
-			require: true, allowNonTS: false, assigned: []netip.Addr{loopback},
-			wantErrPart: "tailscale",
-		},
-		{
-			name: "unassigned address", listen: "100.100.0.5:9481",
-			require: false, allowNonTS: true, assigned: []netip.Addr{loopback},
-			wantErrPart: "not assigned",
+			name: "unassigned address", listen: "192.168.50.99:9481",
+			assigned: []netip.Addr{loopback}, wantErrPart: "not assigned",
 		},
 	}
 	for _, tc := range cases {
@@ -390,8 +426,7 @@ func TestValidateBindWithInjectedInterfaces(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testConfig(fake)
 			cfg.Listen = tc.listen
-			cfg.Security.RequireTailscaleBind = tc.require
-			cfg.Security.AllowNonTailscaleBind = tc.allowNonTS
+			cfg.Security.AllowPublicBind = tc.allowPublic
 			err := cfg.validateBindWith(tc.assigned)
 			if tc.wantErrPart == "" {
 				if err != nil {

@@ -31,6 +31,10 @@ type Spec struct {
 	// Port is the destination port for TCP/UDP probes. It must be nil for
 	// ICMP and is always a bounded integer (model.ValidatePortForProtocol).
 	Port *int
+	// Interface optionally selects a source network interface by name. Empty
+	// means automatic routing. The Agent validates the name against its live
+	// enumerated interface set before execution.
+	Interface string
 	// MaxHops is the maximum TTL to probe.
 	MaxHops int
 	// Queries is the number of probes per TTL.
@@ -44,7 +48,7 @@ type Spec struct {
 //
 // The argument vector is deterministic and follows this shape:
 //
-//	<family> [<protocol-flag>] [--traceroute] --json <queries-flag> <queries> <max-hops-flag> <max-hops> [--timeout <ms>] [-p <port>] <target>
+//	<family> [<protocol-flag>] [-D <interface>] [--traceroute] --json <queries-flag> <queries> <max-hops-flag> <max-hops> [--timeout <ms>] [-p <port>] <target>
 //
 // ICMP has no protocol flag (it is NextTrace's default). TCP maps to the
 // detected -T/--tcp flag, UDP to -U/--udp, and both additionally require the
@@ -78,6 +82,14 @@ func (c Capabilities) BuildArgs(spec Spec) ([]string, error) {
 	if !c.SupportsProtocol(spec.Protocol) {
 		return nil, fmt.Errorf("nexttrace does not support the requested protocol")
 	}
+	if spec.Interface != "" {
+		if err := model.ValidateInterfaceName(spec.Interface); err != nil {
+			return nil, fmt.Errorf("invalid network interface name")
+		}
+		if _, ok := c.Flags.deviceFlag(); !ok {
+			return nil, fmt.Errorf("nexttrace does not support source-device selection")
+		}
+	}
 	if spec.MaxHops < model.MinMaxHops || spec.MaxHops > model.MaxMaxHops {
 		return nil, fmt.Errorf("max hops is out of range")
 	}
@@ -106,10 +118,17 @@ func (c Capabilities) BuildArgs(spec Spec) ([]string, error) {
 		return nil, fmt.Errorf("nexttrace does not support the requested protocol flag")
 	}
 
-	args := make([]string, 0, 13)
+	args := make([]string, 0, 15)
 	args = append(args, familyFlag)
 	if protocolFlag != "" {
 		args = append(args, protocolFlag)
+	}
+	if spec.Interface != "" {
+		deviceFlag, ok := c.Flags.deviceFlag()
+		if !ok {
+			return nil, fmt.Errorf("nexttrace does not support source-device selection")
+		}
+		args = append(args, deviceFlag, spec.Interface)
 	}
 	if c.Flags.Traceroute {
 		args = append(args, "--traceroute")
@@ -157,12 +176,18 @@ func assertArgv(c Capabilities, spec Spec, argv []string, addr netip.Addr) error
 		"--udp":                           true,
 		"-p":                              true,
 		"--port":                          true,
+		"-D":                              true,
+		"--dev":                           true,
+		spec.Interface:                    true,
 		strconv.Itoa(spec.MaxHops):        true,
 		strconv.Itoa(spec.Queries):        true,
 		strconv.Itoa(spec.ProbeTimeoutMS): true,
 	}
 	if spec.Port != nil {
 		allowed[strconv.Itoa(*spec.Port)] = true
+	}
+	if spec.Interface == "" {
+		delete(allowed, "")
 	}
 	if len(argv) == 0 {
 		return fmt.Errorf("empty argument vector")
@@ -181,6 +206,18 @@ func assertArgv(c Capabilities, spec Spec, argv []string, addr netip.Addr) error
 		}
 	} else if len(argv) < 2 || argv[1] != protocolFlag {
 		return fmt.Errorf("argument vector does not carry the expected protocol flag")
+	}
+	devicePosition := 1
+	if protocolFlag != "" {
+		devicePosition = 2
+	}
+	if spec.Interface != "" {
+		deviceFlag, ok := c.Flags.deviceFlag()
+		if !ok || len(argv) <= devicePosition+1 || argv[devicePosition] != deviceFlag || argv[devicePosition+1] != spec.Interface {
+			return fmt.Errorf("argument vector does not carry the expected source-device pair")
+		}
+	} else if containsArg(argv, "-D") || containsArg(argv, "--dev") {
+		return fmt.Errorf("automatic routing must not carry a source-device flag")
 	}
 	if target := argv[len(argv)-1]; target != addr.String() {
 		return fmt.Errorf("target must be the final argument and must equal the normalized address")

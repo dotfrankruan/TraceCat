@@ -64,6 +64,8 @@ type Config struct {
 	Security  SecurityConfig  `json:"security"`
 	RateLimit RateLimitConfig `json:"rate_limit"`
 	LogLevel  string          `json:"log_level"`
+	// Interfaces is the optional source-interface eligibility configuration.
+	Interfaces InterfacesConfig `json:"interfaces"`
 }
 
 // AuthConfig names the environment variable that holds the per-Agent bearer
@@ -89,12 +91,13 @@ type NextTraceConfig struct {
 	AllowedProtocols []string `json:"allowed_protocols"`
 }
 
-// SecurityConfig is the Agent's local defense-in-depth policy.
+// SecurityConfig is the Agent's local defense-in-depth policy. The bind
+// policy is generic: any assigned, non-wildcard, non-public address is
+// acceptable; a globally routable listen address requires an explicit opt-in.
 type SecurityConfig struct {
-	AllowPrivateTargets   bool     `json:"allow_private_targets"`
-	AllowedCIDRs          []string `json:"allowed_cidrs"`
-	RequireTailscaleBind  bool     `json:"require_tailscale_bind"`
-	AllowNonTailscaleBind bool     `json:"allow_non_tailscale_bind"`
+	AllowPrivateTargets bool     `json:"allow_private_targets"`
+	AllowedCIDRs        []string `json:"allowed_cidrs"`
+	AllowPublicBind     bool     `json:"allow_public_bind"`
 }
 
 // RateLimitConfig controls the Agent's token buckets and HTTP concurrency.
@@ -104,22 +107,17 @@ type RateLimitConfig struct {
 	MaxConcurrentHTTP int `json:"max_concurrent_http"`
 }
 
-// rawConfig mirrors Config for strict decoding. Pointer fields are used where
-// a zero value is meaningful (require_tailscale_bind defaults to true).
+// rawConfig mirrors Config for strict decoding.
 type rawConfig struct {
-	NodeID    string          `json:"node_id"`
-	Name      string          `json:"name"`
-	Listen    string          `json:"listen"`
-	Auth      AuthConfig      `json:"auth"`
-	NextTrace NextTraceConfig `json:"nexttrace"`
-	Security  struct {
-		AllowPrivateTargets   bool     `json:"allow_private_targets"`
-		AllowedCIDRs          []string `json:"allowed_cidrs"`
-		RequireTailscaleBind  *bool    `json:"require_tailscale_bind"`
-		AllowNonTailscaleBind bool     `json:"allow_non_tailscale_bind"`
-	} `json:"security"`
-	RateLimit RateLimitConfig `json:"rate_limit"`
-	LogLevel  string          `json:"log_level"`
+	NodeID     string           `json:"node_id"`
+	Name       string           `json:"name"`
+	Listen     string           `json:"listen"`
+	Auth       AuthConfig       `json:"auth"`
+	NextTrace  NextTraceConfig  `json:"nexttrace"`
+	Security   SecurityConfig   `json:"security"`
+	RateLimit  RateLimitConfig  `json:"rate_limit"`
+	LogLevel   string           `json:"log_level"`
+	Interfaces InterfacesConfig `json:"interfaces"`
 }
 
 // Load reads, strictly decodes and validates the Agent configuration file.
@@ -147,24 +145,16 @@ func Load(path string) (Config, error) {
 }
 
 func (r rawConfig) toConfig() (Config, error) {
-	requireTailscale := true
-	if r.Security.RequireTailscaleBind != nil {
-		requireTailscale = *r.Security.RequireTailscaleBind
-	}
 	cfg := Config{
-		NodeID:    r.NodeID,
-		Name:      r.Name,
-		Listen:    r.Listen,
-		Auth:      r.Auth,
-		NextTrace: r.NextTrace,
-		Security: SecurityConfig{
-			AllowPrivateTargets:   r.Security.AllowPrivateTargets,
-			AllowedCIDRs:          r.Security.AllowedCIDRs,
-			RequireTailscaleBind:  requireTailscale,
-			AllowNonTailscaleBind: r.Security.AllowNonTailscaleBind,
-		},
-		RateLimit: r.RateLimit,
-		LogLevel:  r.LogLevel,
+		NodeID:     r.NodeID,
+		Name:       r.Name,
+		Listen:     r.Listen,
+		Auth:       r.Auth,
+		NextTrace:  r.NextTrace,
+		Security:   r.Security,
+		RateLimit:  r.RateLimit,
+		LogLevel:   r.LogLevel,
+		Interfaces: r.Interfaces,
 	}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
@@ -272,8 +262,8 @@ func (c *Config) Validate() error {
 	if _, err := ipguard.NewPolicy(c.Security.AllowedCIDRs); err != nil {
 		return fmt.Errorf("security.allowed_cidrs: %w", err)
 	}
-	if !c.Security.RequireTailscaleBind && !c.Security.AllowNonTailscaleBind {
-		return errors.New("security.require_tailscale_bind=false requires security.allow_non_tailscale_bind=true for an explicit lab configuration")
+	if err := validateInterfacesConfig(c.Interfaces); err != nil {
+		return fmt.Errorf("interfaces: %w", err)
 	}
 	addrs, err := interfaceAddrs()
 	if err != nil {

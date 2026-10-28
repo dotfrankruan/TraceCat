@@ -256,7 +256,9 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer wrong' \
   - *401 from Agent*: token mismatch or missing env var; tokens are compared
     exactly (no trimming of intentional characters).
   - *`target_rejected`*: destination is outside the default global-unicast
-    policy; add a narrow admin CIDR allowlist deliberately (never `0.0.0.0/0`).
+    policy; add a narrow admin CIDR allowlist deliberately on BOTH layers
+    (`security.allowed_cidrs` in `controller.json` and in `agent.json`); never
+    `0.0.0.0/0`.
   - *Agents trace a different path than local resolution*: expected for
     CDN/GeoDNS; the dashboard warns about this and shows the exact IP traced.
 

@@ -1,0 +1,69 @@
+# Changelog
+
+All notable changes to TraceCat are documented here. The project follows
+[Semantic Versioning](https://semver.org/) and the wire contract carries its own
+schema versions (`tracecat.agent.v1`, `tracecat.controller.v1`).
+
+## [0.1.0] — 2026-10-28
+
+Initial deployable MVP: a Go Controller + Tailscale-only Go Agents running the
+external NextTrace CLI, with an embedded React dashboard.
+
+### Added
+
+- **Controller**: central A/AAAA + IDN resolution with bounded timeout,
+  deduplication and destination-policy filtering; explicit multi-address
+  selection; bounded worker pool and per-node timeouts; per-node
+  Pending/Running/Completed/Failed/Timed out/Cancelled states with partial-job
+  aggregation; cancellation; SSE state-change snapshots; bounded SQLite history
+  and JSON export (including bounded raw NextTrace output).
+- **Authentication**: Cloudflare Access JWT verification (RS256, cached JWKS,
+  issuer/audience/expiry, optional email allowlists) and local PBKDF2 password
+  sessions with HttpOnly/SameSite cookies and CSRF; default-deny middleware;
+  explicit loopback-only `dev` mode; strict schemas, body limits, rate limits,
+  security headers/CSP and same-origin-only browser API.
+- **Agent**: unprivileged service bound only to its configured Tailscale
+  address; per-Agent bearer token (constant-time); independent revalidation of
+  every request and the destination policy; typed NextTrace argument builder
+  with capability detection; process-group supervision and bounded
+  stdout/stderr; strict version-aware JSON parser with metadata sanitization.
+- **Target policy**: default-deny global-unicast-only destination policy shared
+  by Controller and Agent, IPv4-mapped-IPv6 unmap-before-classify, and an
+  explicit administrator CIDR allowlist on both sides.
+- **Dashboard**: dark, responsive React/TypeScript/Tailwind UI with DNS address
+  selection, agent multi-select, live job state, dense hop tables, deterministic
+  ASN colors, AS-path visualization, side-by-side comparison with honest deltas,
+  bounded history and JSON export. Built assets are committed and embedded;
+  Node.js is build-time only.
+- **Deployment**: example configs, systemd units with sandboxing, Docker/
+  compose for the Controller, Tailscale ACL and Cloudflare Tunnel examples,
+  deployment and security documentation, CI and Dependabot.
+- **Verification**: hermetic fake-NextTrace test harness, adversarial security
+  suite, and an independent real-host deployment verification report
+  (`docs/VERIFICATION.md`).
+
+### Fixed during hardening
+
+- NextTrace v1.7.x capability detection with real pflag-style help output
+  (`-j  --json`).
+- NextTrace v1.7.x non-root privilege advisory printed before JSON is now
+  tolerated without weakening JSON validation or retaining the banner.
+- `MemoryDenyWriteExecute` removed from the Agent systemd unit (NextTrace v1.7.3
+  SIGSEGVs under a W^X policy); kept on the Controller, which never execs it.
+- Reverse DNS: NextTrace's top-level `Hostname` field is parsed (previously
+  `Address.Domain` only).
+- Job concurrency slot is released before the terminal state is published,
+  removing a transient `503` race after a job finishes.
+- Interrupted jobs are reconciled to `failed` on Controller restart instead of
+  remaining "running" in history.
+- Dashboard no longer reports the expected SSE close after a terminal snapshot
+  as a transport error.
+- Controller `security.allowed_cidrs` added so private-lab destinations can be
+  explicitly approved at both layers.
+
+### Known limitations
+
+See the "Limitations" section of `README.md`: one-shot ICMP only, single-tenant
+authorization, no job resumption after a Controller restart, cleartext HTTP
+inside the tailnet, third-party GeoIP accuracy, and in-memory per-instance rate
+limits.

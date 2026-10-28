@@ -82,8 +82,10 @@ After changing dashboard sources, rebuild the committed assets with
 `make ui` (requires Node 22+/pnpm); deployed servers never run Node.
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for systemd, Tailscale and
-Cloudflare deployment, [docs/API.md](docs/API.md) for the wire contract, and
-[`SECURITY.md`](SECURITY.md) for the threat model.
+Cloudflare deployment, [docs/API.md](docs/API.md) for the wire contract,
+[`SECURITY.md`](SECURITY.md) for the threat model, and
+[docs/VERIFICATION.md](docs/VERIFICATION.md) for the independent real-host
+verification report.
 
 ## Production topology
 
@@ -104,7 +106,10 @@ Cloudflare deployment, [docs/API.md](docs/API.md) for the wire contract, and
 - Tests do not require public traceroute targets, real GeoIP services, or
   internet access.
 
-See [docs/TESTING.md](docs/TESTING.md) for exactly what is verified.
+See [docs/TESTING.md](docs/TESTING.md) for exactly what is verified, and
+[docs/VERIFICATION.md](docs/VERIFICATION.md) for the independent Debian/
+Tailscale deployment and security verification report (PASS/FAIL checks,
+browser screenshots).
 
 ## Limitations (MVP)
 

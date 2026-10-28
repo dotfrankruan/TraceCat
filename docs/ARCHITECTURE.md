@@ -52,8 +52,10 @@ traceroute itself.
 - Detects the installed binary's version and flag capabilities at startup
   (`--version`, `--help`); unsupported/missing flags are a configuration error,
   never a reason to guess.
-- One-shot ICMP traceroute only in the MVP (`-4`/`-6`, `--json`, `-m`, `-q`,
-  optional `--timeout`, optional explicit `--traceroute` when detected).
+- One-shot ICMP, TCP or UDP traceroute (`-4`/`-6`, `--json`, `-m`, `-q`,
+  optional `--timeout`, optional explicit `--traceroute` for ICMP when
+  detected, `-T`/`-U` plus a bounded `-p` port for TCP/UDP). MTR is not
+  supported.
 - Parses NextTrace JSON into isolated DTOs (`nexttrace.json.v1`) and then into
   stable internal models; a NextTrace schema change does not leak into the
   dashboard contract.
@@ -122,7 +124,7 @@ See `docs/API.md` for the normative wire contract.
 
 No arbitrary command execution, no user-supplied Agent URLs or tokens, no
 remote self-update, no plugin loading, no file upload/download beyond JSON job
-exports, no TCP/UDP/MTR in the MVP, no multi-tenant authorization, no external
+exports, no MTR sessions, no multi-tenant authorization, no external
 message broker. These are security decisions, not missing plumbing.
 
 ## 6. Deployment topology

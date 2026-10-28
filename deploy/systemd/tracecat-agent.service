@@ -20,7 +20,7 @@ RestartSec=5s
 TimeoutStopSec=30s
 KillSignal=SIGTERM
 
-# NextTrace needs CAP_NET_RAW for ICMP (and TCP/UDP SYN later). Grant it to the
+# NextTrace needs CAP_NET_RAW for ICMP and TCP/UDP SYN probes. Grant it to the
 # Agent process as an *ambient* capability so the unprivileged nexttrace child
 # inherits it without root, setuid, or a setcap binary:
 #   AmbientCapabilities=CAP_NET_RAW

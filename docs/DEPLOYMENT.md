@@ -15,7 +15,7 @@ never accepts a hostname or arbitrary arguments.
 | Host | Requirements |
 | --- | --- |
 | Controller | Go-built binary (or Docker), write access to a state dir, Cloudflare Tunnel (recommended) or tailnet-only exposure |
-| Agent | Linux + systemd (recommended), Tailscale (logged in, address assigned), NextTrace installed, a dedicated unprivileged user, ability to grant `CAP_NET_RAW` |
+| Agent | Linux + systemd (recommended), Tailscale (logged in, address assigned), NextTrace installed, a dedicated unprivileged user, ability to grant `CAP_NET_RAW` (ICMP and TCP/UDP SYN probes) |
 | Network | Controller can reach Agent `listen` IP:port over Tailscale; Agents reach the Internet for traceroute/GeoIP |
 
 Tests and this documentation were verified with NextTrace v1.7.3 on Debian 13,

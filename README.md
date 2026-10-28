@@ -40,6 +40,9 @@ shell, no user-controlled executable or flags, and no generic command API.
 - **DNS resolved once, centrally.** A/AAAA + IDN, deduplicated, policy-filtered;
   multiple addresses are always presented as an explicit choice, and only the
   selected numeric IP is sent to Agents.
+- **ICMP, TCP and UDP probes.** Protocols are a fixed enum mapped to
+  capability-detected NextTrace flags; TCP/UDP require an explicit destination
+  port bounded to 1..65535, and each layer enforces its own protocol allowlist.
 - **Honest results.** Per-node Pending/Running/Completed/Failed/Timed out/
   Cancelled, bounded history, raw JSON export, and a UI that never claims an
   intermediate timeout means a broken route.
@@ -123,7 +126,8 @@ browser screenshots).
 
 ## Limitations (MVP)
 
-- One-shot ICMP traceroute only; TCP/UDP and MTR are intentionally not exposed.
+- One-shot ICMP, TCP and UDP traceroute with bounded destination ports; MTR
+  sessions are intentionally not exposed.
 - Single-tenant: every authenticated user may use all configured nodes.
 - No resumable jobs after a Controller restart; bounded history only.
 - Agent transport is HTTP inside the Tailscale/WireGuard tailnet.

@@ -4,6 +4,18 @@ All notable changes to TraceCat are documented here. The project follows
 [Semantic Versioning](https://semver.org/) and the wire contract carries its own
 schema versions (`tracecat.agent.v1`, `tracecat.controller.v1`).
 
+## [Unreleased]
+
+### Added
+
+- Optional TCP and UDP traceroute in addition to ICMP. The protocol is a fixed
+  enum (`icmp`/`tcp`/`udp`) mapped to capability-detected NextTrace flags, and
+  TCP/UDP probes require an explicit destination port bounded to `1..65535`
+  (numeric only). Both Controller and Agent enforce their own
+  `allowed_protocols` allowlist; the dashboard exposes a protocol selector and
+  validated port input, and protocol/port are stored, displayed and exported
+  with each job. MTR sessions remain unsupported.
+
 ## [0.1.0] — 2026-10-28
 
 Initial deployable MVP: a Go Controller + Tailscale-only Go Agents running the

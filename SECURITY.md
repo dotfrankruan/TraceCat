@@ -74,11 +74,13 @@ install it from a trusted source and pin/upgrade deliberately.
 
 ### T2. Argument / option injection
 **Threat:** passing `-o /etc/...`, `-t` (MTR), `--deploy`, `--speed`, extra
-tokens, or a second positional target.
+tokens, a port range/service name, or a second positional target.
 **Controls:** no user string ever reaches argv. Only fixed flags, bounded
 integers converted with `strconv.Itoa`, the family flag derived from the parsed
-address, and the canonical IP. Protocol is an enum restricted to `icmp`.
-TCP/UDP/MTR/deploy/web-console modes are not implemented.
+address, and the canonical IP. Protocol is a fixed enum (`icmp`/`tcp`/`udp`)
+mapped to capability-detected flags; TCP/UDP ports are validated integers in
+`1..65535` (never strings, ranges or service names) and are forbidden for ICMP.
+MTR/deploy/web-console modes are not implemented.
 
 ### T3. SSRF / internal network reconnaissance
 **Threat:** tracing loopback, RFC1918, CGNAT, link-local (cloud metadata),

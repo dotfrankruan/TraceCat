@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useId, useMemo } from 'react'
 import type { ApiError } from '../api/client'
 import type { NodeInfo } from '../api/types'
 import { absoluteTimestamp, relativeTime } from '../lib/format'
@@ -24,13 +24,146 @@ function sortNodes(nodes: NodeInfo[]): NodeInfo[] {
   })
 }
 
+function AgentRow({
+  node,
+  selected,
+  disabled,
+  atLimit,
+  maxNodes,
+  override,
+  onToggle,
+  onInterfaceChange,
+}: {
+  node: NodeInfo
+  selected: boolean
+  disabled: boolean
+  atLimit: boolean
+  maxNodes: number
+  override: string | undefined
+  onToggle: (id: string) => void
+  onInterfaceChange: (nodeId: string, interfaceName: string) => void
+}) {
+  const selectId = useId()
+  const health = node.enabled ? healthMeta(node.health) : healthMeta('disabled')
+  const interfaces = node.interfaces ?? []
+  const showInterfaceSelector = selected && node.enabled && interfaces.length > 0
+
+  const rowClass = !node.enabled
+    ? 'border-line/60 bg-ink-950/40 opacity-70'
+    : selected
+      ? 'border-accent/45 bg-accent/[0.055]'
+      : 'border-line bg-ink-950/40 hover:border-line-strong hover:bg-ink-850/60'
+
+  return (
+    <li
+      className={`rounded border transition-colors ${rowClass}`}
+      title={
+        !node.enabled
+          ? 'Disabled by the controller administrator'
+          : !selected && atLimit
+            ? `Selection limit of ${maxNodes} reached`
+            : undefined
+      }
+    >
+      <label className="flex cursor-pointer items-start gap-2 px-2 py-1.5">
+        <input
+          type="checkbox"
+          className="check-input mt-0.5"
+          checked={selected}
+          disabled={disabled}
+          onChange={() => onToggle(node.id)}
+          aria-label={`Select agent ${node.name}${node.enabled ? '' : ' (disabled)'}`}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+            <span className="truncate text-[12px] font-medium text-fg">{node.name}</span>
+            <span className="font-mono text-[9px] text-dim">{node.id}</span>
+            <span
+              className={`badge badge-square ml-auto ${health.badge}`}
+              title={`Agent health: ${health.label}`}
+            >
+              <span className={`h-1 w-1 rounded-full ${health.dot}`} aria-hidden="true" />
+              {health.label}
+            </span>
+          </span>
+          <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10px] leading-snug text-muted">
+            {node.location ? <span className="truncate">{node.location}</span> : null}
+            {node.provider ? (
+              <>
+                <span aria-hidden="true" className="text-dim">
+                  ·
+                </span>
+                <span className="truncate">{node.provider}</span>
+              </>
+            ) : null}
+            {node.nexttrace_version ? (
+              <>
+                <span aria-hidden="true" className="text-dim">
+                  ·
+                </span>
+                <span className="font-mono text-dim">nt {node.nexttrace_version}</span>
+              </>
+            ) : null}
+            {node.last_seen ? (
+              <>
+                <span aria-hidden="true" className="text-dim">
+                  ·
+                </span>
+                <span
+                  className="text-dim"
+                  title={`Last seen ${absoluteTimestamp(node.last_seen)}`}
+                >
+                  seen {relativeTime(node.last_seen)}
+                </span>
+              </>
+            ) : null}
+          </span>
+        </span>
+      </label>
+
+      {showInterfaceSelector ? (
+        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 border-t border-line/50 px-2 py-1.5">
+          <label htmlFor={selectId} className="micro shrink-0">
+            Interface
+          </label>
+          <select
+            id={selectId}
+            className="input h-7 max-w-[16rem] flex-1 py-0 font-mono text-[11px]"
+            value={override ?? ''}
+            onChange={(event) => onInterfaceChange(node.id, event.target.value)}
+            aria-label={`Source network interface for ${node.name}`}
+            title="Automatic lets the OS choose the egress interface; an explicit choice pins that advertised interface for this agent."
+          >
+            <option value="">Automatic (OS routing)</option>
+            {interfaces.map((interfaceName) => (
+              <option key={interfaceName} value={interfaceName}>
+                {interfaceName}
+              </option>
+            ))}
+          </select>
+          {override ? (
+            <span
+              className="badge badge-square border-accent/35 bg-accent/10 text-accent"
+              title="Explicit interface override for this agent"
+            >
+              iface {override}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+    </li>
+  )
+}
+
 export function AgentPanel({
   nodes,
   loading,
   error,
   selectedIds,
+  interfaceOverrides,
   maxNodes,
   onToggle,
+  onInterfaceChange,
   onSelectAll,
   onClear,
   onRefresh,
@@ -39,8 +172,10 @@ export function AgentPanel({
   loading: boolean
   error: ApiError | null
   selectedIds: ReadonlySet<string>
+  interfaceOverrides: Readonly<Record<string, string>>
   maxNodes: number
   onToggle: (id: string) => void
+  onInterfaceChange: (nodeId: string, interfaceName: string) => void
   onSelectAll: () => void
   onClear: () => void
   onRefresh: () => void
@@ -48,6 +183,13 @@ export function AgentPanel({
   const sorted = useMemo(() => sortNodes(nodes), [nodes])
   const enabledCount = useMemo(() => nodes.filter((node) => node.enabled).length, [nodes])
   const atLimit = selectedIds.size >= maxNodes
+  const selectedWithInterfaces = useMemo(
+    () =>
+      nodes.some(
+        (node) => selectedIds.has(node.id) && node.enabled && (node.interfaces?.length ?? 0) > 0,
+      ),
+    [nodes, selectedIds],
+  )
 
   return (
     <section className="panel" aria-labelledby="agents-heading">
@@ -87,9 +229,7 @@ export function AgentPanel({
           </div>
         ) : null}
 
-        {error ? (
-          <ErrorNote error={error} onRetry={onRefresh} compact />
-        ) : null}
+        {error ? <ErrorNote error={error} onRetry={onRefresh} compact /> : null}
 
         {!loading && !error && nodes.length === 0 ? (
           <EmptyState
@@ -112,87 +252,28 @@ export function AgentPanel({
               {sorted.map((node) => {
                 const selected = selectedIds.has(node.id)
                 const disabled = !node.enabled || (!selected && atLimit)
-                const health = node.enabled ? healthMeta(node.health) : healthMeta('disabled')
                 return (
-                  <li key={node.id}>
-                    <label
-                      className={`flex items-start gap-2 rounded border px-2 py-1.5 transition-colors ${
-                        !node.enabled
-                          ? 'cursor-not-allowed border-line/60 bg-ink-950/40 opacity-70'
-                          : selected
-                            ? 'cursor-pointer border-accent/45 bg-accent/[0.055]'
-                            : 'cursor-pointer border-line bg-ink-950/40 hover:border-line-strong hover:bg-ink-850/60'
-                      }`}
-                      title={
-                        !node.enabled
-                          ? 'Disabled by the controller administrator'
-                          : !selected && atLimit
-                            ? `Selection limit of ${maxNodes} reached`
-                            : undefined
-                      }
-                    >
-                      <input
-                        type="checkbox"
-                        className="check-input mt-0.5"
-                        checked={selected}
-                        disabled={disabled}
-                        onChange={() => onToggle(node.id)}
-                        aria-label={`Select agent ${node.name}${node.enabled ? '' : ' (disabled)'}`}
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
-                          <span className="truncate text-[12px] font-medium text-fg">
-                            {node.name}
-                          </span>
-                          <span className="font-mono text-[9px] text-dim">{node.id}</span>
-                          <span
-                            className={`badge badge-square ml-auto ${health.badge}`}
-                            title={`Agent health: ${health.label}`}
-                          >
-                            <span className={`h-1 w-1 rounded-full ${health.dot}`} aria-hidden="true" />
-                            {health.label}
-                          </span>
-                        </span>
-                        <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10px] leading-snug text-muted">
-                          {node.location ? <span className="truncate">{node.location}</span> : null}
-                          {node.provider ? (
-                            <>
-                              <span aria-hidden="true" className="text-dim">
-                                ·
-                              </span>
-                              <span className="truncate">{node.provider}</span>
-                            </>
-                          ) : null}
-                          {node.nexttrace_version ? (
-                            <>
-                              <span aria-hidden="true" className="text-dim">
-                                ·
-                              </span>
-                              <span className="font-mono text-dim">
-                                nt {node.nexttrace_version}
-                              </span>
-                            </>
-                          ) : null}
-                          {node.last_seen ? (
-                            <>
-                              <span aria-hidden="true" className="text-dim">
-                                ·
-                              </span>
-                              <span
-                                className="text-dim"
-                                title={`Last seen ${absoluteTimestamp(node.last_seen)}`}
-                              >
-                                seen {relativeTime(node.last_seen)}
-                              </span>
-                            </>
-                          ) : null}
-                        </span>
-                      </span>
-                    </label>
-                  </li>
+                  <AgentRow
+                    key={node.id}
+                    node={node}
+                    selected={selected}
+                    disabled={disabled}
+                    atLimit={atLimit}
+                    maxNodes={maxNodes}
+                    override={selected ? interfaceOverrides[node.id] : undefined}
+                    onToggle={onToggle}
+                    onInterfaceChange={onInterfaceChange}
+                  />
                 )
               })}
             </ul>
+
+            {selectedWithInterfaces ? (
+              <p className="mt-1.5 text-[10px] leading-snug text-dim">
+                Interface overrides are optional and per agent. “Automatic” uses OS routing; an
+                explicit choice pins an interface advertised by that agent.
+              </p>
+            ) : null}
 
             <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-line/70 pt-2">
               <button

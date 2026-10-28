@@ -128,6 +128,16 @@ export function NodeResultCard({
         <div className="flex shrink-0 items-center gap-2">
           <span
             className="badge badge-square border-line-strong text-muted"
+            title={
+              node.interface
+                ? `Reported source interface: ${node.interface}`
+                : 'Automatic routing — the OS chooses the egress interface'
+            }
+          >
+            {node.interface ? `iface ${node.interface}` : 'iface auto'}
+          </span>
+          <span
+            className="badge badge-square border-line-strong text-muted"
             title="Probe protocol and destination port"
           >
             {probeLabel(protocol, port)}

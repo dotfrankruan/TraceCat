@@ -86,6 +86,7 @@ export function App() {
     tcp: String(DEFAULT_PORTS.tcp),
     udp: String(DEFAULT_PORTS.udp),
   })
+  const [interfaceOverrides, setInterfaceOverrides] = useState<Record<string, string>>({})
 
   const [job, setJob] = useState<Job | null>(null)
   const [jobLoading, setJobLoading] = useState(false)
@@ -242,6 +243,32 @@ export function App() {
     )
   }, [availableProtocols])
 
+  // Interface overrides are per-node and only meaningful while the node stays
+  // selected and keeps advertising the chosen interface. Deselecting a node (or
+  // a refresh that removes the interface) resets it back to Automatic.
+  useEffect(() => {
+    setInterfaceOverrides((previous) => {
+      const selected = new Set(selectedNodeIds)
+      const byId = new Map(nodes.map((node) => [node.id, node]))
+      let changed = false
+      const next: Record<string, string> = {}
+      for (const [nodeId, interfaceName] of Object.entries(previous)) {
+        const node = byId.get(nodeId)
+        if (
+          !selected.has(nodeId) ||
+          !node ||
+          !node.enabled ||
+          !(node.interfaces ?? []).includes(interfaceName)
+        ) {
+          changed = true
+          continue
+        }
+        next[nodeId] = interfaceName
+      }
+      return changed ? next : previous
+    })
+  }, [nodes, selectedNodeIds])
+
   const handleLogin = useCallback(
     async (password: string) => {
       setLoginBusy(true)
@@ -335,10 +362,52 @@ export function App() {
     [protocol],
   )
 
+  const handleInterfaceChange = useCallback((nodeId: string, interfaceName: string) => {
+    setInterfaceOverrides((previous) => {
+      const next = { ...previous }
+      if (interfaceName.length === 0) delete next[nodeId]
+      else next[nodeId] = interfaceName
+      return next
+    })
+  }, [])
+
   const requiresPort = protocolRequiresPort(protocol)
   const activePortInput = protocol === 'tcp' || protocol === 'udp' ? portInputs[protocol] : ''
   const portError = requiresPort ? validatePortInput(activePortInput) : null
   const destinationPort = requiresPort && portError === null ? parsePortInput(activePortInput) : null
+
+  const nodeInterfaces = useMemo(() => {
+    const selected = new Set(selectedNodeIds)
+    const byId = new Map(nodes.map((node) => [node.id, node]))
+    const overrides: Record<string, string> = {}
+    for (const [nodeId, interfaceName] of Object.entries(interfaceOverrides)) {
+      if (!selected.has(nodeId)) continue
+      const node = byId.get(nodeId)
+      if (!node || !(node.interfaces ?? []).includes(interfaceName)) continue
+      overrides[nodeId] = interfaceName
+    }
+    return overrides
+  }, [interfaceOverrides, nodes, selectedNodeIds])
+
+  const interfaceOverrideCount = Object.keys(nodeInterfaces).length
+
+  const hasStaleInterfaceOverride = useMemo(
+    () =>
+      Object.entries(interfaceOverrides).some(([nodeId, interfaceName]) => {
+        if (!selectedNodeIds.includes(nodeId)) return false
+        const node = nodes.find((candidate) => candidate.id === nodeId)
+        return !node || !(node.interfaces ?? []).includes(interfaceName)
+      }),
+    [interfaceOverrides, nodes, selectedNodeIds],
+  )
+
+  const selectedAgentInterfaces = useMemo(
+    () =>
+      nodes
+        .filter((node) => selectedNodeIds.includes(node.id))
+        .map((node) => ({ node, interfaceName: interfaceOverrides[node.id] ?? '' })),
+    [interfaceOverrides, nodes, selectedNodeIds],
+  )
 
   const startBlockReason = useMemo(() => {
     if (!session) return 'Session unavailable.'
@@ -356,6 +425,9 @@ export function App() {
     }
     if (requiresPort && portError) return portError
     if (requiresPort && destinationPort == null) return 'Enter a destination port between 1 and 65535.'
+    if (hasStaleInterfaceOverride) {
+      return 'An interface selection is no longer advertised by its agent; refresh agents or pick another interface.'
+    }
     if (maxHops < 1 || maxHops > session.limits.max_hops) {
       return `Max hops must be between 1 and ${session.limits.max_hops}.`
     }
@@ -375,6 +447,7 @@ export function App() {
     requiresPort,
     portError,
     destinationPort,
+    hasStaleInterfaceOverride,
     maxHops,
     queries,
   ])
@@ -394,6 +467,9 @@ export function App() {
       }
       // ICMP must omit the port field entirely; TCP/UDP require it.
       if (requiresPort && destinationPort != null) request.port = destinationPort
+      // Only explicit (non-empty) interface overrides are sent; omitted nodes
+      // use automatic OS routing.
+      if (interfaceOverrideCount > 0) request.node_interfaces = nodeInterfaces
       const response = await createJob(request)
       setJob(response.job)
       setJobFromHistory(false)
@@ -441,6 +517,8 @@ export function App() {
     protocol,
     requiresPort,
     destinationPort,
+    nodeInterfaces,
+    interfaceOverrideCount,
   ])
 
   const refreshJob = useCallback(
@@ -679,8 +757,10 @@ export function App() {
               loading={nodesBusy}
               error={nodesError}
               selectedIds={selectedNodeSet}
+              interfaceOverrides={interfaceOverrides}
               maxNodes={maxNodesPerJob}
               onToggle={handleToggleNode}
+              onInterfaceChange={handleInterfaceChange}
               onSelectAll={handleSelectAllNodes}
               onClear={handleClearNodes}
               onRefresh={() => void loadNodes()}
@@ -851,6 +931,27 @@ export function App() {
                     ? `agents probe ${protocol} destination port ${destinationPort ?? '—'} on this IP`
                     : 'agents send ICMP echo probes to only this numeric destination'}
                 </p>
+                {interfaceOverrideCount > 0 ? (
+                  <div className="mt-1.5 border-t border-line/60 pt-1.5">
+                    <p className="micro">Agent interfaces</p>
+                    <ul className="mt-0.5 space-y-0.5">
+                      {selectedAgentInterfaces.map(({ node, interfaceName }) => (
+                        <li
+                          key={node.id}
+                          className="flex items-baseline justify-between gap-2 font-mono text-[9px]"
+                        >
+                          <span className="min-w-0 truncate text-muted">{node.name}</span>
+                          <span className={interfaceName ? 'text-accent' : 'text-dim'}>
+                            {interfaceName ? `iface ${interfaceName}` : 'auto'}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-0.5 text-[9px] leading-snug text-dim">
+                      auto = OS routing chooses the egress interface.
+                    </p>
+                  </div>
+                ) : null}
               </section>
             ) : null}
           </aside>

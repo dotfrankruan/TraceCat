@@ -102,6 +102,11 @@ export interface NodeInfo {
   health: NodeHealth | string
   last_seen?: string
   nexttrace_version?: string
+  /**
+   * Agent-advertised selectable network interfaces (loopback/virtual excluded).
+   * Absent or empty when the Agent/controller cannot advertise them.
+   */
+  interfaces?: string[]
 }
 
 export interface NodeList {
@@ -116,6 +121,12 @@ export interface CreateJobRequest {
   protocol: Protocol
   /** Required for tcp/udp (integer 1..65535); MUST be omitted for icmp. */
   port?: number
+  /**
+   * Optional per-node source-interface overrides. Keys must be selected node
+   * ids; names must be advertised by that node. Omit a node or use "" for
+   * automatic routing, so the client only sends non-empty selections.
+   */
+  node_interfaces?: Record<string, string>
   max_hops: number
   queries: number
   timeout_ms: number
@@ -165,6 +176,11 @@ export interface NodeResult {
   location?: string
   provider?: string
   status: NodeStatus
+  /**
+   * Source network interface selected for this node; empty/absent means
+   * automatic routing (the OS picks the egress interface).
+   */
+  interface?: string
   started_at?: string
   ended_at?: string
   duration_ms?: number

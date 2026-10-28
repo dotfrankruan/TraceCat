@@ -46,6 +46,10 @@ with `make dev-controller` first. The dashboard has no router: all state lives a
 - Probe protocols come from `session.limits.protocols` (icmp/tcp/udp). TCP/UDP
   require a validated integer destination port (1–65535, defaults 80/TCP and
   33494/UDP, preserved per protocol); ICMP omits the port field entirely.
+- Agents that advertise network interfaces get a per-node Automatic/interface
+  selector; only explicit overrides are sent as `node_interfaces`. Automatic
+  means OS routing picks the egress interface. Nodes without an advertised list
+  show no selector (older controllers degrade to automatic silently).
 - The CSRF token returned by `GET /api/v1/session` is kept in module memory only
   (`src/api/client.ts`) and sent as `X-TraceCat-CSRF` on every POST.
 - Live updates use the controller SSE stream as state-change notifications (full

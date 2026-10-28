@@ -64,6 +64,11 @@ type jobState struct {
 	cancel    context.CancelFunc
 	cancelled bool
 	done      bool
+	// releaseOnce guarantees the global job slot is released exactly once.
+	// The slot is released as soon as all node workers finish, before the
+	// terminal job state becomes visible, so a client that observes a finished
+	// job can immediately start another one without a transient 503.
+	releaseOnce sync.Once
 }
 
 // ManagerOption customizes a Manager (tests inject clocks/id generators and a
@@ -368,7 +373,7 @@ func jobNodeIDs(job *model.Job) []string {
 
 func (m *Manager) runJob(ctx context.Context, st *jobState) {
 	defer m.wg.Done()
-	defer m.releaseJobSlot()
+	defer st.releaseOnce.Do(m.releaseJobSlot)
 	defer st.cancel()
 
 	st.mu.Lock()
@@ -396,6 +401,9 @@ func (m *Manager) runJob(ctx context.Context, st *jobState) {
 		}(nodeID)
 	}
 	nodeWG.Wait()
+	// Free the concurrency slot before publishing the terminal state so a client
+	// that just observed completion can immediately submit the next job.
+	st.releaseOnce.Do(m.releaseJobSlot)
 
 	st.mu.Lock()
 	if ctx.Err() != nil {

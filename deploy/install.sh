@@ -153,7 +153,17 @@ detect_private_ip() {
     $2 !~ /^(lo|docker|veth|br-|virbr|bridge|vmnet|vboxnet|cni|flannel|calico|podman|lxc|lxd|kube)/ {
       split($4, a, "/"); print a[1]
     }')"
-  printf '%s\n' "$addrs" | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.)' | head -1
+  # Prefer a tailnet (100.64.0.0/10) address: it is routable from other hosts
+  # by design. Only fall back to RFC1918 LAN addresses when there is no
+  # tailnet address; never auto-select link-local or public addresses.
+  local tailnet lan
+  tailnet="$(printf '%s\n' "$addrs" | grep -E '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.' | head -1)"
+  if [[ -n "$tailnet" ]]; then
+    printf '%s\n' "$tailnet"
+    return 0
+  fi
+  lan="$(printf '%s\n' "$addrs" | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -1)"
+  printf '%s\n' "$lan"
 }
 
 generate_token() {

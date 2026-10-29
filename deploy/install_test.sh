@@ -103,6 +103,23 @@ for bad in "Local" "-node" "node id" "node.name"; do
   fi
 done
 
+# Address auto-detection must prefer a tailnet address over a LAN address.
+fakebin="$(mktemp -d)"
+cat >"$fakebin/ip" <<'FAKE'
+#!/usr/bin/env bash
+cat <<'OUT'
+2: eth0    inet 10.0.0.45/24 brd 10.0.0.255 scope global eth0
+3: tailscale0    inet 100.66.66.66/32 scope global tailscale0
+4: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0
+OUT
+FAKE
+chmod +x "$fakebin/ip"
+detected="$(PATH="$fakebin:$PATH" detect_private_ip)"
+if [[ "$detected" != "100.66.66.66" ]]; then
+  echo "FAIL: detect_private_ip preferred '$detected' over the tailnet address"; fail=1
+fi
+rm -rf "$fakebin"
+
 # Enrollment-mode flags parse without requiring an --agent machine list.
 if ! ( parse_args controller --enrollment --auth local --listen 10.0.0.5:8080 \
         --public-origin https://trace.example.com ) 2>/dev/null; then

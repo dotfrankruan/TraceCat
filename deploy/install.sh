@@ -153,12 +153,7 @@ detect_private_ip() {
     $2 !~ /^(lo|docker|veth|br-|virbr|bridge|vmnet|vboxnet|cni|flannel|calico|podman|lxc|lxd|kube)/ {
       split($4, a, "/"); print a[1]
     }')"
-  private="$(printf '%s\n' "$addrs" | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.)' | head -1)"
-  if [[ -n "$private" ]]; then
-    printf '%s\n' "$private"
-  else
-    printf '%s\n' "$addrs" | head -1
-  fi
+  printf '%s\n' "$addrs" | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.)' | head -1
 }
 
 generate_token() {
@@ -335,11 +330,17 @@ write_agent_config() {
   if [[ -z "$AGENT_LISTEN" ]]; then
     local detected
     detected="$(detect_private_ip)"
-    [[ -n "$detected" ]] || die "could not auto-detect an address; pass --listen <private-ip>:8443"
+    [[ -n "$detected" ]] || die "no private/tailnet IPv4 address found; pass --listen <private-ip>:8443 (or, for a public bind, add --listen <public-ip>:8443 --allow-public-bind with a TLS front end and --advertise-url)"
     AGENT_LISTEN="${detected}:8443"
     log "auto-detected listen address: $AGENT_LISTEN"
   fi
   [[ "$AGENT_LISTEN" =~ ^(\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f:.]+):[0-9]{1,5}$ ]] || die "invalid --listen (expected ip:port): $AGENT_LISTEN"
+  local listen_ip="${AGENT_LISTEN%:*}"
+  listen_ip="${listen_ip#[}"
+  listen_ip="${listen_ip%]}"
+  if [[ "$ALLOW_PUBLIC_BIND" -eq 0 ]] && ! [[ "$listen_ip" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.|127\.|::1$) ]]; then
+    die "--listen $AGENT_LISTEN is not a private/tailnet address; refusing a public bind (use --allow-public-bind with TLS, or bind a private IP)"
+  fi
 
   NEXTTRACE_PATH="${NEXTTRACE_PATH:-$(command -v nexttrace || true)}"
   [[ -n "$NEXTTRACE_PATH" ]] || die "NextTrace not found; install it or pass --nexttrace /path/to/nexttrace"

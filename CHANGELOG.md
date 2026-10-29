@@ -4,6 +4,15 @@ All notable changes to TraceCat are documented here. The project follows
 [Semantic Versioning](https://semver.org/) and the wire contract carries its own
 schema versions (`tracecat.agent.v1`, `tracecat.controller.v1`).
 
+## [Unreleased]
+
+### Added
+
+- One-command quickstart (`deploy/quickstart.sh`): installs a loopback-only
+  Controller + Agent, generates local-auth credentials, and prints the URL and
+  password. README/QUICKSTART/DEPLOYMENT now lead with this path; the existing
+  installer remains for multi-host/private-network deployments.
+
 ## [0.1.1] — 2026-10-28
 
 ### Added

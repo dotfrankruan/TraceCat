@@ -129,7 +129,10 @@ export function ErrorNote({
   compact?: boolean
 }) {
   const retrySeconds =
-    error.retryAfterMs != null ? Math.max(1, Math.ceil(error.retryAfterMs / 1000)) : null
+    error.status === 429 && error.retryAfterMs != null
+      ? Math.max(1, Math.ceil(error.retryAfterMs / 1000))
+      : null
+  const gatewayFailure = error.status === 502 || error.status === 503 || error.status === 504
 
   return (
     <div
@@ -152,6 +155,12 @@ export function ErrorNote({
           {retrySeconds !== null ? (
             <p className="mt-0.5 text-[11px] text-warn">
               Rate limited — retry after about {retrySeconds}s.
+            </p>
+          ) : null}
+          {gatewayFailure ? (
+            <p className="mt-0.5 text-[11px] text-warn">
+              The Cloudflare tunnel or Controller is unreachable — check cloudflared
+              and the Controller service, then retry.
             </p>
           ) : null}
         </div>

@@ -74,7 +74,10 @@ function parseRetryAfter(header: string | null): number | undefined {
 async function parseFailure(response: Response): Promise<ApiError> {
   const retryAfterMs = parseRetryAfter(response.headers.get('Retry-After'))
   let code = `http_${response.status}`
-  let message = `Request failed with status ${response.status}.`
+  let message =
+    response.status === 502 || response.status === 503 || response.status === 504
+      ? `The Controller is unreachable through its proxy/tunnel (HTTP ${response.status}).`
+      : `Request failed with status ${response.status}.`
   try {
     const body: unknown = await response.json()
     if (body && typeof body === 'object' && 'error' in body) {

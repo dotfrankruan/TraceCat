@@ -435,7 +435,95 @@ vendor or modify NextTrace:
 
 ---
 
-## 9. Testing this integration
+## 9. Auto-enrollment (Controller auto-detection)
+
+In static mode the Controller must be configured with every Agent's URL and
+token. Auto-enrollment inverts this: an Agent can register itself with a
+Controller, so no per-machine Controller flags or node list entries are needed.
+
+### Configuration
+
+```json
+{
+  "node_id": "tokyo-1",
+  "name": "Tokyo",
+  "listen": "100.64.0.10:8443",
+  "auth": { "token_env": "" },
+  "controller": {
+    "url": "https://tracecat.example.com",
+    "enrollment_token_env": "TRACECAT_ENROLLMENT_TOKEN",
+    "advertise_url": "http://100.64.0.10:8443",
+    "name": "Tokyo",
+    "location": "Tokyo, JP",
+    "provider": "DMIT",
+    "refresh_seconds": 300
+  }
+}
+```
+
+| Field | Default | Meaning |
+| ----- | ------- | ------- |
+| `controller.url` | required | Controller base URL. `https` is required for public hosts; plain `http` is only allowed for a literal non-public IP address (`ipguard.IsNonPublic`). Userinfo, query, fragment and path are rejected. |
+| `controller.enrollment_token_env` | required | Environment variable holding the shared enrollment secret (at least 32 characters). The value is never written to the config file and never logged. |
+| `controller.advertise_url` | `http://` + `listen` | URL the Controller should use to reach this Agent. Same transport rules as `controller.url`. |
+| `controller.name` | `name` | Display name sent to the Controller. |
+| `controller.location`, `controller.provider` | `""` | Optional display metadata sent to the Controller. |
+| `controller.refresh_seconds` | `300` | Enrollment/token refresh interval, 60..3600 seconds. |
+
+When the `controller` section is present, `auth.token_env` is optional and may
+be empty: the Controller issues the inbound trace token during enrollment.
+Without the `controller` section the Agent runs exactly as before in static
+mode and `auth.token_env` remains required.
+
+The advertised URL defaults to `http://` + `listen`. If the listen address is
+loopback and the Controller is not local, an explicit `controller.advertise_url`
+is required; an advertised loopback URL with a remote Controller is rejected.
+For the local one-command quickstart both the Controller and the Agent are on
+loopback, so the default is accepted.
+
+### Flow and token lifecycle
+
+1. At startup the Agent listens immediately. Until enrollment succeeds every
+   inbound `/v1/health` and `/v1/trace` request receives `401`.
+2. A background goroutine `POST`s `model.AgentEnrollRequest` as JSON to
+   `<controller.url>` + `model.EnrollmentPath`
+   (`/api/v1/agents/enroll`) with
+   `Authorization: Bearer <enrollment secret>`. The body carries the schema
+   version, node id, display metadata, advertised URL, detected NextTrace
+   version and effective protocol list.
+3. The Controller validates the advertised URL with its own private/HTTPS
+   transport rules, registers/updates the node (source `auto`) and returns
+   `model.AgentEnrollResponse` (Controller schema version
+   `tracecat.controller.v1`) containing a per-Agent inbound trace token and the
+   echoed `trace_url`.
+4. The Agent strictly validates the response (schema version, node id,
+   non-empty token, `trace_url` match) and installs the token in a thread-safe,
+   atomically rotated in-memory store. The token is never written to disk, the
+   config file or logs; it is used only to authenticate inbound Controller
+   requests.
+5. Failed attempts (network/HTTP/validation) are retried with bounded
+   exponential backoff (1 s .. 30 s) until success. A failed refresh keeps the
+   previous token valid. After success the Agent refreshes every
+   `controller.refresh_seconds` (default 300 s); each refresh rotates the
+   in-memory token atomically so new Controller requests authenticate
+   immediately. The Agent never crashes because enrollment is unavailable.
+
+### Firewall direction and URL visibility
+
+- The Agent only needs **outbound** access to the Controller's HTTPS endpoint
+  for enrollment (`Agent -> Controller`).
+- The Controller needs to reach the Agent's **advertised URL** for authenticated
+  `/v1/health` and `/v1/trace` calls (`Controller -> Agent`); this is exactly
+  the URL the Agent advertises, so the Controller needs no per-Agent URL
+  configuration.
+- The enrollment secret is shared out of band (same value in the Controller
+  config and the Agent's `controller.enrollment_token_env` environment).
+- Enrollment is metrics-free and deliberately never logs tokens, response
+  bodies or environment values.
+
+---
+
+## 10. Testing this integration
 
 The deterministic fake in `internal/nexttrace/testdata/fake/main.go` stands in
 for the real binary in tests. It records argv and environment, and can emit

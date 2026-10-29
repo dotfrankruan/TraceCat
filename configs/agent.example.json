@@ -3,7 +3,7 @@
   "name": "Tokyo",
   "listen": "100.64.0.10:8443",
   "auth": {
-    "token_env": "TRACECAT_AGENT_TOKEN"
+    "token_env": ""
   },
   "nexttrace": {
     "binary": "/usr/local/bin/nexttrace",
@@ -14,6 +14,15 @@
     "max_raw_bytes": 1048576,
     "geo_provider": "",
     "allowed_protocols": ["icmp", "tcp", "udp"]
+  },
+  "controller": {
+    "url": "https://tracecat.example.com",
+    "enrollment_token_env": "TRACECAT_ENROLLMENT_TOKEN",
+    "advertise_url": "http://100.64.0.10:8443",
+    "name": "Tokyo",
+    "location": "Tokyo, JP",
+    "provider": "DMIT",
+    "refresh_seconds": 300
   },
   "security": {
     "allow_private_targets": false,

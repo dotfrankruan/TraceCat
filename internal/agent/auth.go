@@ -12,17 +12,37 @@ import (
 	"time"
 )
 
-// tokenAuth verifies the per-Agent bearer token. Only SHA-256 digests are
-// retained and compared in constant time; the token itself is never logged.
-type tokenAuth struct {
-	digest [sha256.Size]byte
+// tokenStore holds the per-Agent inbound bearer token. Only SHA-256 digests
+// are retained and compared in constant time; the token itself is never
+// logged. The store starts empty in controller-enrollment mode (all inbound
+// requests get 401 until enrollment succeeds) and is rotated atomically when a
+// refresh returns a new token.
+type tokenStore struct {
+	mu       sync.RWMutex
+	digest   [sha256.Size]byte
+	enrolled bool
 }
 
-func newTokenAuth(token string) tokenAuth {
-	return tokenAuth{digest: sha256.Sum256([]byte(token))}
+func newTokenStore(token string) *tokenStore {
+	store := &tokenStore{}
+	if token != "" {
+		store.setToken(token)
+	}
+	return store
 }
 
-func (a tokenAuth) authorized(r *http.Request) bool {
+// setToken atomically replaces the inbound trace token.
+func (s *tokenStore) setToken(token string) {
+	digest := sha256.Sum256([]byte(token))
+	s.mu.Lock()
+	s.digest = digest
+	s.enrolled = true
+	s.mu.Unlock()
+}
+
+// authorized verifies a bearer token in constant time against the current
+// digest. An unenrolled store rejects every request.
+func (s *tokenStore) authorized(r *http.Request) bool {
 	header := r.Header.Get("Authorization")
 	scheme, value, ok := strings.Cut(header, " ")
 	if !ok || !strings.EqualFold(scheme, "Bearer") {
@@ -32,8 +52,14 @@ func (a tokenAuth) authorized(r *http.Request) bool {
 	if value == "" {
 		return false
 	}
+
 	presented := sha256.Sum256([]byte(value))
-	return subtle.ConstantTimeCompare(a.digest[:], presented[:]) == 1
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.enrolled {
+		return false
+	}
+	return subtle.ConstantTimeCompare(s.digest[:], presented[:]) == 1
 }
 
 // remoteIP returns the TCP peer IP for rate limiting. Forwarding headers are

@@ -506,3 +506,225 @@ func TestAgentLimitsAreAdvertised(t *testing.T) {
 		t.Fatalf("limits = %+v", limits)
 	}
 }
+
+func controllerConfigMap(url string) map[string]any {
+	return map[string]any{
+		"url":                  url,
+		"enrollment_token_env": testEnrollmentTokenEnv,
+		"refresh_seconds":      60,
+	}
+}
+
+func enableController(m map[string]any, controller map[string]any) {
+	m["auth"] = map[string]any{"token_env": ""}
+	m["controller"] = controller
+}
+
+func TestLoadControllerConfig(t *testing.T) {
+	fake := newFakeNexttrace(t, fakeControl{})
+	t.Setenv(testTokenEnv, testToken)
+	t.Setenv(testEnrollmentTokenEnv, testEnrollmentSecret)
+
+	t.Run("local loopback controller with default advertise URL", func(t *testing.T) {
+		cfg, err := loadConfigWith(t, fake, func(m map[string]any) {
+			enableController(m, controllerConfigMap("http://127.0.0.1:18080"))
+		})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Controller == nil {
+			t.Fatal("controller section was not loaded")
+		}
+		if cfg.Auth.TokenEnv != "" {
+			t.Fatalf("auth.token_env = %q, want empty in enrollment mode", cfg.Auth.TokenEnv)
+		}
+		if got := cfg.AdvertiseURL(); got != "http://127.0.0.1:9481" {
+			t.Fatalf("advertise URL = %q, want default http://127.0.0.1:9481", got)
+		}
+		if cfg.Controller.RefreshSeconds != 60 {
+			t.Fatalf("refresh_seconds = %d, want 60", cfg.Controller.RefreshSeconds)
+		}
+	})
+
+	t.Run("remote https controller with explicit private advertise", func(t *testing.T) {
+		controller := controllerConfigMap("https://controller.example.com")
+		controller["advertise_url"] = "http://192.168.50.10:8443"
+		controller["name"] = "Tokyo edge"
+		controller["location"] = "Tokyo, JP"
+		controller["provider"] = "DMIT"
+		cfg, err := loadConfigWith(t, fake, func(m map[string]any) {
+			enableController(m, controller)
+		})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got := cfg.AdvertiseURL(); got != "http://192.168.50.10:8443" {
+			t.Fatalf("advertise URL = %q", got)
+		}
+	})
+
+	t.Run("remote controller requires advertise URL when listen is loopback", func(t *testing.T) {
+		_, err := loadConfigWith(t, fake, func(m map[string]any) {
+			enableController(m, controllerConfigMap("https://controller.example.com"))
+		})
+		if err == nil || !strings.Contains(err.Error(), "advertise_url") {
+			t.Fatalf("Load error = %v, want advertise_url requirement", err)
+		}
+	})
+
+	t.Run("remote controller rejects loopback advertise", func(t *testing.T) {
+		controller := controllerConfigMap("https://controller.example.com")
+		controller["advertise_url"] = "http://127.0.0.1:9481"
+		_, err := loadConfigWith(t, fake, func(m map[string]any) {
+			enableController(m, controller)
+		})
+		if err == nil || !strings.Contains(err.Error(), "loopback") {
+			t.Fatalf("Load error = %v, want loopback advertise rejection", err)
+		}
+	})
+
+	t.Run("https advertise hostname accepted", func(t *testing.T) {
+		controller := controllerConfigMap("https://controller.example.com")
+		controller["advertise_url"] = "https://agent.example.com:8443"
+		if _, err := loadConfigWith(t, fake, func(m map[string]any) {
+			enableController(m, controller)
+		}); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+	})
+
+	t.Run("refresh defaults and bounds", func(t *testing.T) {
+		controller := controllerConfigMap("http://127.0.0.1:18080")
+		delete(controller, "refresh_seconds")
+		cfg, err := loadConfigWith(t, fake, func(m map[string]any) {
+			enableController(m, controller)
+		})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.Controller.RefreshSeconds != defaultEnrollRefreshSeconds {
+			t.Fatalf("default refresh = %d, want %d", cfg.Controller.RefreshSeconds, defaultEnrollRefreshSeconds)
+		}
+		for _, refresh := range []int{59, 3601} {
+			controller := controllerConfigMap("http://127.0.0.1:18080")
+			controller["refresh_seconds"] = refresh
+			if _, err := loadConfigWith(t, fake, func(m map[string]any) {
+				enableController(m, controller)
+			}); err == nil {
+				t.Fatalf("Load accepted refresh_seconds=%d", refresh)
+			}
+		}
+	})
+
+	t.Run("metadata validation", func(t *testing.T) {
+		controller := controllerConfigMap("http://127.0.0.1:18080")
+		controller["name"] = "Tok\nyo"
+		if _, err := loadConfigWith(t, fake, func(m map[string]any) {
+			enableController(m, controller)
+		}); err == nil {
+			t.Fatal("Load accepted control characters in controller.name")
+		}
+	})
+}
+
+func TestLoadControllerEndpointURLRules(t *testing.T) {
+	fake := newFakeNexttrace(t, fakeControl{})
+	t.Setenv(testTokenEnv, testToken)
+	t.Setenv(testEnrollmentTokenEnv, testEnrollmentSecret)
+
+	t.Run("http with non-public literal IP accepted", func(t *testing.T) {
+		controller := controllerConfigMap("http://192.168.50.20:8080")
+		controller["advertise_url"] = "http://192.168.50.10:8443"
+		if _, err := loadConfigWith(t, fake, func(m map[string]any) {
+			enableController(m, controller)
+		}); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+	})
+
+	invalid := map[string]string{
+		"http public literal": "http://1.1.1.1:8080",
+		"http hostname":       "http://controller.example.com",
+		"ftp scheme":          "ftp://controller.example.com",
+		"relative":            "controller.example.com",
+		"userinfo":            "https://user:pass@controller.example.com",
+		"query":               "https://controller.example.com?x=1",
+		"fragment":            "https://controller.example.com#frag",
+		"path":                "https://controller.example.com/api",
+		"trailing slash path": "https://controller.example.com/",
+	}
+	for name, url := range invalid {
+		url := url
+		t.Run(name, func(t *testing.T) {
+			controller := controllerConfigMap(url)
+			controller["advertise_url"] = "http://192.168.50.10:8443"
+			if _, err := loadConfigWith(t, fake, func(m map[string]any) {
+				enableController(m, controller)
+			}); err == nil {
+				t.Fatalf("Load accepted controller URL %q", url)
+			}
+		})
+	}
+
+	t.Run("public advertise URL over http rejected", func(t *testing.T) {
+		controller := controllerConfigMap("https://controller.example.com")
+		controller["advertise_url"] = "http://1.1.1.1:8443"
+		if _, err := loadConfigWith(t, fake, func(m map[string]any) {
+			enableController(m, controller)
+		}); err == nil {
+			t.Fatal("Load accepted a public http advertise URL")
+		}
+	})
+}
+
+func TestLoadControllerEnrollmentSecretValidation(t *testing.T) {
+	fake := newFakeNexttrace(t, fakeControl{})
+	t.Setenv(testTokenEnv, testToken)
+
+	t.Run("missing secret", func(t *testing.T) {
+		unsetEnv(t, testEnrollmentTokenEnv)
+		if _, err := loadConfigWith(t, fake, func(m map[string]any) {
+			enableController(m, controllerConfigMap("http://127.0.0.1:18080"))
+		}); err == nil || !strings.Contains(err.Error(), "enrollment_token_env") {
+			t.Fatalf("Load error = %v, want missing enrollment secret", err)
+		}
+	})
+
+	t.Run("short secret", func(t *testing.T) {
+		t.Setenv(testEnrollmentTokenEnv, "too-short")
+		if _, err := loadConfigWith(t, fake, func(m map[string]any) {
+			enableController(m, controllerConfigMap("http://127.0.0.1:18080"))
+		}); err == nil || !strings.Contains(err.Error(), "at least 32") {
+			t.Fatalf("Load error = %v, want minimum enrollment secret length", err)
+		}
+	})
+
+	t.Run("invalid env name", func(t *testing.T) {
+		t.Setenv(testEnrollmentTokenEnv, testEnrollmentSecret)
+		controller := controllerConfigMap("http://127.0.0.1:18080")
+		controller["enrollment_token_env"] = "bad name"
+		if _, err := loadConfigWith(t, fake, func(m map[string]any) {
+			enableController(m, controller)
+		}); err == nil {
+			t.Fatal("Load accepted an invalid enrollment_token_env name")
+		}
+	})
+
+	t.Run("controller mode auth token env must still be a valid name if set", func(t *testing.T) {
+		t.Setenv(testEnrollmentTokenEnv, testEnrollmentSecret)
+		if _, err := loadConfigWith(t, fake, func(m map[string]any) {
+			enableController(m, controllerConfigMap("http://127.0.0.1:18080"))
+			m["auth"] = map[string]any{"token_env": "bad name"}
+		}); err == nil {
+			t.Fatal("Load accepted a malformed auth.token_env in controller mode")
+		}
+	})
+}
+
+func TestStaticModeStillRequiresAuthToken(t *testing.T) {
+	fake := newFakeNexttrace(t, fakeControl{})
+	unsetEnv(t, testTokenEnv)
+	if _, err := loadConfigWith(t, fake, nil); err == nil || !strings.Contains(err.Error(), "auth.token_env") {
+		t.Fatalf("static Load error = %v, want auth.token_env requirement", err)
+	}
+}

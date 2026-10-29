@@ -38,6 +38,23 @@ type InterfaceLister func() ([]string, error)
 // Option customizes Agent construction.
 type Option func(*Agent)
 
+// WithEnrollmentRetry overrides the enrollment retry/refresh timing. It is
+// intended for tests; production timing comes from controller.refresh_seconds
+// with a 1s..30s exponential backoff.
+func WithEnrollmentRetry(minBackoff, maxBackoff, refresh time.Duration) Option {
+	return func(a *Agent) {
+		if minBackoff > 0 {
+			a.enrollRetryMin = minBackoff
+		}
+		if maxBackoff > 0 {
+			a.enrollRetryMax = maxBackoff
+		}
+		if refresh > 0 {
+			a.enrollRefresh = refresh
+		}
+	}
+}
+
 // WithInterfaceLister overrides interface enumeration. It is intended for
 // tests and embedders that must not depend on the host's real interfaces.
 func WithInterfaceLister(lister InterfaceLister) Option {
@@ -53,7 +70,7 @@ type Agent struct {
 	cfg    Config
 	logger *slog.Logger
 
-	auth   tokenAuth
+	auth   *tokenStore
 	policy ipguard.Policy
 	runner *nexttrace.Runner
 	caps   nexttrace.Capabilities
@@ -68,6 +85,11 @@ type Agent struct {
 	interfaceLister InterfaceLister
 	interfaceMu     sync.Mutex
 	interfaces      []string
+
+	enrollment     *enrollmentClient
+	enrollRefresh  time.Duration
+	enrollRetryMin time.Duration
+	enrollRetryMax time.Duration
 
 	handler http.Handler
 	baseCtx context.Context
@@ -91,9 +113,13 @@ func New(cfg Config, logger *slog.Logger, opts ...Option) (*Agent, error) {
 		logger.Warn("listening on a publicly routable address because security.allow_public_bind=true",
 			"listen", listenAddr.String())
 	}
-	token, ok := os.LookupEnv(cfg.Auth.TokenEnv)
-	if !ok || len(token) < minTokenLength {
-		return nil, fmt.Errorf("auth.token_env %q must be set and contain at least %d characters", cfg.Auth.TokenEnv, minTokenLength)
+	staticToken := ""
+	if cfg.Controller == nil {
+		token, ok := os.LookupEnv(cfg.Auth.TokenEnv)
+		if !ok || len(token) < minTokenLength {
+			return nil, fmt.Errorf("auth.token_env %q must be set and contain at least %d characters", cfg.Auth.TokenEnv, minTokenLength)
+		}
+		staticToken = token
 	}
 	policy, err := buildPolicy(cfg.Security)
 	if err != nil {
@@ -102,15 +128,17 @@ func New(cfg Config, logger *slog.Logger, opts ...Option) (*Agent, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	agent := &Agent{
-		cfg:      cfg,
-		logger:   logger,
-		auth:     newTokenAuth(token),
-		policy:   policy,
-		limiter:  newRateLimiter(cfg.RateLimit.RequestsPerMinute, cfg.RateLimit.Burst),
-		httpSem:  make(chan struct{}, cfg.RateLimit.MaxConcurrentHTTP),
-		traceSem: make(chan struct{}, cfg.NextTrace.MaxConcurrentTraces),
-		baseCtx:  ctx,
-		cancel:   cancel,
+		cfg:            cfg,
+		logger:         logger,
+		auth:           newTokenStore(staticToken),
+		policy:         policy,
+		limiter:        newRateLimiter(cfg.RateLimit.RequestsPerMinute, cfg.RateLimit.Burst),
+		httpSem:        make(chan struct{}, cfg.RateLimit.MaxConcurrentHTTP),
+		traceSem:       make(chan struct{}, cfg.NextTrace.MaxConcurrentTraces),
+		baseCtx:        ctx,
+		cancel:         cancel,
+		enrollRetryMin: time.Second,
+		enrollRetryMax: 30 * time.Second,
 		interfaceLister: func() ([]string, error) {
 			return enumerateInterfaces(cfg.Interfaces, systemInterfaceSource)
 		},
@@ -155,6 +183,21 @@ func New(cfg Config, logger *slog.Logger, opts ...Option) (*Agent, error) {
 		MaxTimeoutMS:        cfg.NextTrace.MaxExecutionMS,
 		MaxConcurrentTraces: cfg.NextTrace.MaxConcurrentTraces,
 		Protocols:           model.ProtocolNames(agent.protocols),
+	}
+	if cfg.Controller != nil {
+		enrollment, enrollErr := newEnrollmentClient(cfg, caps.Version, model.ProtocolNames(agent.protocols))
+		if enrollErr != nil {
+			cancel()
+			return nil, enrollErr
+		}
+		agent.enrollment = enrollment
+		if agent.enrollRefresh <= 0 {
+			agent.enrollRefresh = time.Duration(cfg.Controller.RefreshSeconds) * time.Second
+		}
+		logger.Info("controller enrollment enabled",
+			"controller", cfg.Controller.URL,
+			"advertise_url", cfg.AdvertiseURL(),
+			"refresh_seconds", cfg.Controller.RefreshSeconds)
 	}
 	if caps.SupportsDeviceSelection() {
 		names, enumErr := agent.interfaceLister()
@@ -208,6 +251,9 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
+	if a.enrollment != nil {
+		go a.runEnrollment(a.baseCtx)
+	}
 	a.logger.Info("agent listening", "listen", listenAddr, "nexttrace_available", a.info.Available)
 
 	select {

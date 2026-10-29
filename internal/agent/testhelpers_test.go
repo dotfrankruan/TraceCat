@@ -21,8 +21,10 @@ import (
 )
 
 const (
-	testToken    = "test-agent-token-0123456789"
-	testTokenEnv = "TRACECAT_TEST_AGENT_TOKEN"
+	testToken              = "test-agent-token-0123456789"
+	testTokenEnv           = "TRACECAT_TEST_AGENT_TOKEN"
+	testEnrollmentTokenEnv = "TRACECAT_TEST_ENROLLMENT_TOKEN"
+	testEnrollmentSecret   = "test-enrollment-secret-0123456789abcdef"
 )
 
 var (

@@ -66,12 +66,41 @@ type Config struct {
 	LogLevel  string          `json:"log_level"`
 	// Interfaces is the optional source-interface eligibility configuration.
 	Interfaces InterfacesConfig `json:"interfaces"`
+	// Controller is the optional Controller auto-enrollment section. When nil
+	// the Agent runs in static mode and authenticates inbound requests with the
+	// token from auth.token_env.
+	Controller *ControllerConfig `json:"controller"`
 }
 
 // AuthConfig names the environment variable that holds the per-Agent bearer
-// token. The token itself is never stored in the configuration file.
+// token. The token itself is never stored in the configuration file. In
+// controller-enrollment mode this may be empty because the Controller issues
+// the token during enrollment.
 type AuthConfig struct {
 	TokenEnv string `json:"token_env"`
+}
+
+// ControllerConfig enables Agent-initiated enrollment. When present the Agent
+// registers itself with the Controller, receives a per-Agent inbound trace
+// token, and refreshes it periodically; no per-Agent Controller flags are
+// required.
+type ControllerConfig struct {
+	URL string `json:"url"`
+	// EnrollmentTokenEnv must name an environment variable containing the
+	// shared enrollment secret (at least 32 characters). The secret is never
+	// stored in the config file and never logged.
+	EnrollmentTokenEnv string `json:"enrollment_token_env"`
+	// AdvertiseURL is the URL the Controller should use to reach this Agent.
+	// It defaults to "http://"+listen.
+	AdvertiseURL string `json:"advertise_url"`
+	// Name overrides the Agent display name for enrollment (default: name).
+	Name string `json:"name"`
+	// Location and Provider are optional display metadata.
+	Location string `json:"location"`
+	Provider string `json:"provider"`
+	// RefreshSeconds is the enrollment/token refresh interval (60..3600,
+	// default 300).
+	RefreshSeconds int `json:"refresh_seconds"`
 }
 
 // NextTraceConfig configures execution of the external NextTrace binary.
@@ -109,15 +138,16 @@ type RateLimitConfig struct {
 
 // rawConfig mirrors Config for strict decoding.
 type rawConfig struct {
-	NodeID     string           `json:"node_id"`
-	Name       string           `json:"name"`
-	Listen     string           `json:"listen"`
-	Auth       AuthConfig       `json:"auth"`
-	NextTrace  NextTraceConfig  `json:"nexttrace"`
-	Security   SecurityConfig   `json:"security"`
-	RateLimit  RateLimitConfig  `json:"rate_limit"`
-	LogLevel   string           `json:"log_level"`
-	Interfaces InterfacesConfig `json:"interfaces"`
+	NodeID     string            `json:"node_id"`
+	Name       string            `json:"name"`
+	Listen     string            `json:"listen"`
+	Auth       AuthConfig        `json:"auth"`
+	NextTrace  NextTraceConfig   `json:"nexttrace"`
+	Security   SecurityConfig    `json:"security"`
+	RateLimit  RateLimitConfig   `json:"rate_limit"`
+	LogLevel   string            `json:"log_level"`
+	Interfaces InterfacesConfig  `json:"interfaces"`
+	Controller *ControllerConfig `json:"controller"`
 }
 
 // Load reads, strictly decodes and validates the Agent configuration file.
@@ -155,6 +185,7 @@ func (r rawConfig) toConfig() (Config, error) {
 		RateLimit:  r.RateLimit,
 		LogLevel:   r.LogLevel,
 		Interfaces: r.Interfaces,
+		Controller: r.Controller,
 	}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
@@ -202,6 +233,9 @@ func (c *Config) applyDefaults() {
 	if c.Security.AllowedCIDRs == nil {
 		c.Security.AllowedCIDRs = []string{}
 	}
+	if c.Controller != nil && c.Controller.RefreshSeconds == 0 {
+		c.Controller.RefreshSeconds = defaultEnrollRefreshSeconds
+	}
 }
 
 // Validate enforces every structural, policy and local filesystem constraint.
@@ -220,15 +254,27 @@ func (c *Config) Validate() error {
 	if _, _, err := parseListen(c.Listen); err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	if !envNamePattern.MatchString(c.Auth.TokenEnv) {
-		return errors.New("auth.token_env must be a valid environment variable name")
-	}
-	token, ok := os.LookupEnv(c.Auth.TokenEnv)
-	if !ok {
-		return fmt.Errorf("auth.token_env %q is not set", c.Auth.TokenEnv)
-	}
-	if len(token) < minTokenLength {
-		return fmt.Errorf("auth.token_env %q must contain at least %d characters", c.Auth.TokenEnv, minTokenLength)
+	if c.Controller == nil {
+		// Static mode: an inbound token must be supplied out of band.
+		if !envNamePattern.MatchString(c.Auth.TokenEnv) {
+			return errors.New("auth.token_env must be a valid environment variable name")
+		}
+		token, ok := os.LookupEnv(c.Auth.TokenEnv)
+		if !ok {
+			return fmt.Errorf("auth.token_env %q is not set", c.Auth.TokenEnv)
+		}
+		if len(token) < minTokenLength {
+			return fmt.Errorf("auth.token_env %q must contain at least %d characters", c.Auth.TokenEnv, minTokenLength)
+		}
+	} else {
+		// Enrollment mode: the Controller issues the inbound trace token, so
+		// auth.token_env is optional. If supplied it must still be a valid name.
+		if c.Auth.TokenEnv != "" && !envNamePattern.MatchString(c.Auth.TokenEnv) {
+			return errors.New("auth.token_env must be a valid environment variable name")
+		}
+		if err := c.validateController(); err != nil {
+			return err
+		}
 	}
 	if err := validateBinary(c.NextTrace.Binary); err != nil {
 		return err

@@ -78,6 +78,14 @@ function AgentRow({
           <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
             <span className="truncate text-[12px] font-medium text-fg">{node.name}</span>
             <span className="font-mono text-[9px] text-dim">{node.id}</span>
+            {node.source === 'auto' ? (
+              <span
+                className="badge badge-square border-accent/35 bg-accent/10 text-accent"
+                title="Discovered automatically: the Agent enrolled itself with the Controller"
+              >
+                auto
+              </span>
+            ) : null}
             <span
               className={`badge badge-square ml-auto ${health.badge}`}
               title={`Agent health: ${health.label}`}

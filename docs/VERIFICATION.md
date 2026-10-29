@@ -13,6 +13,7 @@ artifacts live under `verify/`.
 | 1 | Agent: unprivileged systemd deployment on the tailnet, real NextTrace execution, adversarial HTTP matrix | **PASS** (126 PASS / 0 FAIL / 1 informational SKIP) |
 | 2 | Controller + dashboard end-to-end over an SSH tunnel: DNS, multi-node jobs, SSE, export, history, cancellation, restart reconciliation, allowlist, local auth/CSRF/sessions, headless-Chrome screenshots | **PASS** (125 + 61 + 17 PASS / 0 + 0 + 0 FAIL, 1 N/A) |
 | v0.1.1 delta (§13) | TCP/UDP + bounded ports, per-node interface selection, generic private bind policy, one-command installer + local release packaging | **PASS** (408 PASS / 0 FAIL / 3 informational SKIP) |
+| v0.1.2 delta (§14) | Automatic Agent enrollment (Controller `--enrollment`, Agent `--controller`, no machine list) | **PASS** (80 + 12 browser checks / 0 FAIL) |
 | **Total** | | **329 PASS / 0 FAIL / 2 SKIP** |
 
 ## 0. Environment and artifacts
@@ -1975,3 +1976,135 @@ the full `install.sh agent --version 0.1.1 ...` run over the release URL was not
 completed in this environment because cross-border downloads from GitHub were
 extremely slow. The installer itself (same file hash) passed all 61 offline
 installer checks in §13.5.
+
+## 14. v0.1.2 delta verification — automatic Agent enrollment
+
+### 14.1 Scope and verified SHA
+
+Delta verification of automatic Agent enrollment (no Controller machine list):
+an Agent installed with `--controller <url>` + enrollment-token env registers
+itself, receives a per-Agent trace token, appears in the dashboard and is
+immediately usable.
+
+| Item | Value |
+| --- | --- |
+| Verified HEAD | `23a056e` (`installer: print enrollment command on one copy-pasteable line`); enrollment feature commits `d750f2d` (Controller endpoint), `93d83cf` (Agent client/rotation), `4ec4d06`/`eb...` (installer/docs) |
+| Installer SHA | `deploy/install.sh` `c5adb2e0a723418e3eaf3056b48697f410b5fdb3a0aaa5ea2b699cff94d772ee` |
+| Artifacts | local release build `scripts/build-release.sh 0.1.2 amd64`: agent `3c75d3a22a081ac6…`, controller `3f624b029115e4da…` (VERSION=0.1.2), checksums verified; installed via the shipped installer with `--tarball/--checksums` |
+| Host | Debian 13, systemd 257, NextTrace v1.7.3; enrollment Controller on `127.0.0.1:8082`, auto Agent on `127.0.0.1:8446`, temp validation Controllers on `8083/8084`, temp Agent on `8447` |
+| Totals | **92 PASS / 0 FAIL** — enrollment suite **80 PASS / 0 FAIL** + browser **12/12 PASS** (0 console errors, 0 CSP violations, 0 uncaught exceptions) |
+| Defects | **none in production code** (see 14.3 for two harness/UX observations) |
+
+### 14.2 What was verified
+
+| Area | Evidence (80 host checks + 12 browser checks, all PASS) |
+| --- | --- |
+| Controller install with `--enrollment` | zero static `--agent` entries accepted; `enrollment.enabled=true`, `token_env=TRACECAT_ENROLLMENT_TOKEN`, `refresh_after_seconds=300`; 43-char token generated into `/etc/tracecat/controller.env` (0600), printed once with a single copy-pasteable Agent command; secret not in JSON; `/nodes` starts empty; enrollment endpoint rejects browser session/CSRF-only requests (`401`) |
+| Agent install with `--controller` | generated config has `"auth": {}` + `controller{url, enrollment_token_env, advertise_url, refresh_seconds}`; enrollment secret only in `/etc/tracecat/agent.env` (0600, no static `TRACECAT_AGENT_TOKEN`); starts, enrolls, logs `agent enrolled with controller` (node id only) |
+| Auto registration contract | `/nodes` shows `source=auto`, `health=ok`, correct id/name, NextTrace version and interfaces; no URL/token fields; issued 43-char Agent token is persisted and authenticates `/v1/health` (`200`); unauthenticated inbound remains `401` |
+| Real traces through the auto node | ICMP to `1.1.1.1` completed with hops and no port; TCP/443 completed with `protocol=tcp port=443` and hops; per-node interface selection (`eth0`) still honored (`interface=eth0`) |
+| Token rotation / persistence | Agent restart re-enrolls and rotates the issued token; previous token rejected by the Agent (`401`), new token accepted (`200`); Controller restart reloads the persisted auto node + token from SQLite and the node returns healthy; periodic refresh (60 s test cadence) rotates the token on schedule |
+| Negative/security matrix | wrong/missing Bearer `401`; enrollment disabled `404`; malformed JSON / unknown field / wrong schema / invalid node id / missing name `400`; oversized body `413`; advertised-URL matrix (`http` public, hostname `http`, credentials, query, path, fragment, `ftp`) `400`; static node-id collision `409`; rate limit `429` with `Retry-After`; rejected requests never register; static id can never be shadowed by auto |
+| Legacy/static regression | static `--agent` Controller still serves `source=static`, `health=ok`, and completes a real ICMP job; TCP/UDP/interface behavior unchanged (see T checks) |
+| Secret hygiene | enrollment secret and issued Agent tokens absent from Controller/Agent journals, `/api/v1/nodes` and job export; Controller/Agent env files 0600; SQLite database 0600; token column confirmed in `registered_agents` (documented residual risk) |
+| Browser (headless Chrome over tunnel) | dashboard shows the automatically registered node without any Controller edit; health badge OK; no machine-list text; live recovery after `systemctl restart tracecat-agent` **without a page reload** (marker preserved); a UI-started ICMP trace completed with hop rows; 390 px layout, 0 CSP/console/exception errors |
+
+### 14.3 Observations (no production defect)
+
+1. **Node-identity binding is enforced** (correct security behaviour): the
+   Controller rejects an Agent whose `/v1/health` `node_id` does not match the
+   configured id (`agent health response does not match the node`). This first
+   tripped my static-regression probe because it reused the auto node's id with
+   a different static label; re-running with the real id passed. Worth keeping:
+   it prevents URL/token confusion and proves static/auto identity integrity.
+2. **Dashboard does not render the `source` field**: `/nodes` exposes
+   `source=auto|static`, but the Agent card shows only name/id/health/NextTrace
+   version; there is no visible "auto" badge. The user-visible requirement
+   (node appears automatically) is met; a "discovered automatically" badge
+   would be a small UX addition, not a defect.
+3. **Provider network caveat**: from this host `raw.githubusercontent.com` timed
+   out and GitHub release assets transferred at ~10 KB/s, so the one-line
+   `curl | bash` download path could not be exercised here; the same installer
+   driven with `--tarball/--checksums` (identical code after preparation) was
+   used instead.
+
+### 14.4 Results (enrollment suite: 80 PASS / 0 FAIL)
+
+| Section | Checks | Result |
+| --- | --- | --- |
+| P0 prepare (stop stack, back up DB/configs) | 1 | PASS |
+| C Controller `--enrollment` install (token, config, service, no machine list) | 14 | PASS |
+| A Agent `--controller` install + auto registration | 13 | PASS |
+| T real ICMP/TCP/interface traces through auto node | 7 | PASS |
+| L token rotation, re-enroll, Controller-restart persistence, periodic refresh | 9 | PASS |
+| N negative/security matrix (auth, body, URL, collision, rate limit, disabled) | 27 | PASS |
+| X secret hygiene (journals, API, export, file modes, SQLite) | 7 | PASS |
+| cleanup (DB restored, test ports closed) | 2 | PASS |
+| **Total** | **80** | **0 FAIL** |
+
+Browser proof — 12/12 PASS:
+
+{bt}
+
+### 14.5 Residual risks
+
+- **Shared enrollment secret**: one high-entropy secret authorises any Agent
+  that can reach the Controller. Compromise means an attacker can register a
+  rogue Agent (which still only receives a per-Agent inbound token and must be
+  reachable by the Controller). Rotation is "restart the Controller with a new
+  token env value"; there is **no online rotation or revocation endpoint** in
+  this revision, so rotating invalidates re-enrollment for all Agents until
+  they receive the new secret.
+- **Auto-registered Agent tokens are stored raw** in the Controller's 0600
+  SQLite database (needed to call the Agents). Same trust boundary as the
+  Controller host, but backups of `/var/lib/tracecat/controller.db` contain
+  live Agent credentials.
+- There is **no admin UI/API to revoke or disable an auto-enrolled node** yet;
+  deleting its `registered_agents` row (or rotating the enrollment secret and
+  removing the row) is the operational workaround.
+- Enrollment is exposed wherever the Controller listens; keep it on a private
+  overlay/VPC (or behind Cloudflare tunnel) and rate limits (30/min per IP,
+  120/min global) are the only anti-guessing control.
+- Static and auto modes coexist by design: static entries win on id collision;
+  a static node whose id matches an auto registration keeps the static URL and
+  token.
+
+### 14.6 Commands used
+
+```bash
+# Controller (prints token + Agent command)
+bash /root/tc-verify/enroll-install.sh controller --enrollment --auth dev \
+  --listen 127.0.0.1:8082 --public-origin http://127.0.0.1:18090 \
+  --tarball dist/tracecat-controller-linux-amd64.tar.gz --checksums dist/checksums.txt --force
+
+# Agent (copied from the Controller output, with the token env prefixed)
+TRACECAT_ENROLLMENT_TOKEN='<printed token>' \
+  bash /root/tc-verify/enroll-install.sh agent --controller http://127.0.0.1:8082 \
+  --listen 127.0.0.1:8446 --nexttrace /usr/local/bin/nexttrace \
+  --tarball dist/tracecat-agent-linux-amd64.tar.gz --checksums dist/checksums.txt --force
+
+# harness
+scp verify/enrollment-remote-verify.sh root@HOST:/root/tc-verify/
+ssh root@HOST 'bash /root/tc-verify/enrollment-remote-verify.sh'        # 80 PASS / 0 FAIL
+CDP_PORT=9335 APP_URL=http://127.0.0.1:18090/ OUT_DIR=verify/screenshots-v012 \
+  node verify/e2e/drive-v012-enroll.mjs                                # 12/12 PASS
+
+# restore the previous two-Agent + Controller stack
+ssh root@HOST 'rm -f /etc/tracecat/agent.env /etc/tracecat/agent-b.env /etc/tracecat/controller*.env'
+TESTHOST=root@124.222.154.86 verify/setup-testhost-fullstack.sh
+TESTHOST=root@124.222.154.86 verify/setup-testhost-agent.sh
+```
+
+### 14.7 Screenshots (`verify/screenshots-v012/`)
+
+Automatically enrolled node with a completed UI-started ICMP trace:
+
+![Auto-enrolled node and trace](../verify/screenshots-v012/auto-enroll.png)
+
+Dashboard before selection (only the self-registered node, no machine list):
+
+![Dashboard with auto-enrolled node](../verify/screenshots-v012/dashboard.png)
+
+Live recovery after Agent restart without a page reload:
+
+![Live recovery](../verify/screenshots-v012/live-refresh.png)

@@ -4,7 +4,7 @@ All notable changes to TraceCat are documented here. The project follows
 [Semantic Versioning](https://semver.org/) and the wire contract carries its own
 schema versions (`tracecat.agent.v1`, `tracecat.controller.v1`).
 
-## [Unreleased]
+## [0.1.2] — 2026-10-29
 
 ### Added
 
@@ -19,6 +19,8 @@ schema versions (`tracecat.agent.v1`, `tracecat.controller.v1`).
   `agent --controller <url>` and the enrollment token supplied via the
   environment. Multi-Agent is the documented default path; the one-command
   quickstart is explicitly a single-host demo.
+- Dashboard: Agents that registered themselves are marked with an **auto**
+  badge in the agent list.
 - One-command quickstart (`deploy/quickstart.sh`): installs a loopback-only
   Controller + Agent, generates local-auth credentials, and prints the URL and
   password. README/QUICKSTART/DEPLOYMENT now lead with this path; the existing
@@ -124,6 +126,11 @@ external NextTrace CLI, with an embedded React dashboard.
   updated (strict JSON rejects unknown keys).
 
 ### Verification
+
+Independent verification of automatic enrollment (v0.1.2): **92 PASS / 0 FAIL**
+(host enrollment suite 80, browser 12/12) at the feature HEAD, including real
+ICMP/TCP traces through auto-registered Agents, token rotation/persistence,
+static regression and the negative security matrix (`docs/VERIFICATION.md` §14).
 
 Independently verified on Debian 13 + systemd + a private overlay with real
 NextTrace v1.7.3. **v0.1.1 delta: 408 PASS / 0 FAIL / 3 informational SKIPs**

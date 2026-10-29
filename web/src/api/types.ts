@@ -107,6 +107,8 @@ export interface NodeInfo {
    * Absent or empty when the Agent/controller cannot advertise them.
    */
   interfaces?: string[]
+  /** How the node entered the registry: static config or automatic enrollment. */
+  source?: 'static' | 'auto' | string
 }
 
 export interface NodeList {

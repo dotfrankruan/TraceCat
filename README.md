@@ -65,39 +65,31 @@ shell, no user-controlled executable or flags, and no generic command API.
 | `internal/webui`, `web` | Embedded dashboard and its React/TS/Tailwind sources |
 | `deploy`, `configs`, `docs` | installer, systemd units, Docker, private-networking/Cloudflare guidance, API and security docs |
 
-## Quick start (local development)
+## Quick start
 
-Requirements: Go 1.23+ and NextTrace installed. Node/pnpm are needed **only**
-when rebuilding the dashboard; the compiled dashboard is committed and
-embedded, so `make build` and `go build` need no Node.js.
+On a Linux host with systemd and [NextTrace](https://github.com/nxtrace/NTrace-core)
+installed, one command installs a loopback-only Controller + Agent and prints
+the dashboard URL and login password:
 
 ```bash
-# 1. Build both binaries (dashboard assets are committed; no Node needed)
-make build
-
-# 2. Run an Agent against a dev config (loopback for local testing).
-#    If NextTrace is installed elsewhere, set the absolute path in
-#    configs/agent.dev.json ("nexttrace.binary"); hostnames/PATH lookup are
-#    intentionally not accepted.
-TRACECAT_AGENT_TOKEN=local-dev-token-please-change ./bin/tracecat-agent -config configs/agent.dev.json
-
-# 3. Run the Controller in explicit loopback-only dev mode
-./bin/tracecat-controller -config configs/controller.dev.json
-
-# 4. Open http://127.0.0.1:8080
+curl -fsSL https://raw.githubusercontent.com/dotfrankruan/TraceCat/main/deploy/quickstart.sh | sudo bash
 ```
 
-`configs/controller.dev.json` expects the Agent on `127.0.0.1:9481` with the
-`TRACECAT_AGENT_TOKEN` value above. To try the comparison view, run a second
-Agent on another port and add it to the Controller's `agents` list.
+That is the whole setup for a single-host trial. For development from source:
 
-After changing dashboard sources, rebuild the committed assets with
-`make ui` (requires Node 22+/pnpm); deployed servers never run Node.
+```bash
+make build
+TRACECAT_AGENT_TOKEN=local-dev-token-please-change ./bin/tracecat-agent -config configs/agent.dev.json
+./bin/tracecat-controller -config configs/controller.dev.json   # http://127.0.0.1:8080
+```
 
-See **[QUICKSTART.md](QUICKSTART.md)** for the five-minute local walkthrough, then
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the CI-built binary installer,
-private networking and optional Cloudflare deployment, [docs/API.md](docs/API.md) for the wire contract,
-[`SECURITY.md`](SECURITY.md) for the threat model, and
+Node.js is only needed if you rebuild the dashboard (`make ui`); release
+artifacts are single Go binaries.
+
+See **[QUICKSTART.md](QUICKSTART.md)** for the walkthrough, then
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for multi-host/private-network
+deployment and optional Cloudflare Access, [docs/API.md](docs/API.md) for the
+wire contract, [`SECURITY.md`](SECURITY.md) for the threat model, and
 [docs/VERIFICATION.md](docs/VERIFICATION.md) for the independent real-host
 verification report.
 

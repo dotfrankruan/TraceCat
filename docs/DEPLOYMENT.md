@@ -12,6 +12,22 @@ self-contained tarballs (dashboard embedded, no Node.js or runtime
 dependencies). The easiest path is the installer; manual systemd and Docker
 instructions follow for custom setups.
 
+## TL;DR
+
+```bash
+# Single host, one command (Controller + Agent on loopback, local auth):
+curl -fsSL https://raw.githubusercontent.com/dotfrankruan/TraceCat/main/deploy/quickstart.sh | sudo bash
+
+# Distributed: run this on each Agent host, then on the Controller host.
+sudo bash /tmp/tracecat-install.sh agent --listen 10.0.0.5:8443
+sudo -E bash /tmp/tracecat-install.sh controller --auth cloudflare \
+  --public-origin https://trace.example.com \
+  --cf-team-domain https://your-team.cloudflareaccess.com --cf-audience AUD_TAG \
+  --agent agent1,http://10.0.0.5:8443,TRACECAT_TOKEN_AGENT1
+```
+
+The full reference is below.
+
 > **Networking:** TraceCat does not require Tailscale and does not use tags.
 > Any private overlay, VPC or tunnel is fine as long as the Controller can reach
 > each Agent's `listen` address and nothing else can. See

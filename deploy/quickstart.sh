@@ -105,6 +105,7 @@ log "installing Agent on 127.0.0.1:${AGENT_PORT}"
 bash "$INSTALLER" agent \
   --listen "127.0.0.1:${AGENT_PORT}" \
   --nexttrace "$NEXTTRACE_PATH" \
+  --node-id local \
   --no-start ${version_args[@]+"${version_args[@]}"} ${force_args[@]+"${force_args[@]}"}
 systemctl enable --now tracecat-agent >/dev/null
 sleep 1

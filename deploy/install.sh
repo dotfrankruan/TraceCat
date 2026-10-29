@@ -40,6 +40,7 @@ AGENT_SPECS=()
 # agent options
 AGENT_LISTEN=""
 AGENT_TOKEN=""
+AGENT_NODE_ID=""
 NEXTTRACE_PATH=""
 ALLOW_PUBLIC_BIND=0
 PROTOCOLS="icmp,tcp,udp"
@@ -83,6 +84,8 @@ Agent options:
                            10.0.0.5:8443 or 127.0.0.1:9481
   --token <token>          bearer token (default: generate a random one)
   --nexttrace <path>       NextTrace binary (default: discover in PATH)
+  --node-id <id>           Agent node id (default: hostname; must match the
+                           Controller's agents[].id)
   --protocols <csv>        enabled protocols (default icmp,tcp,udp)
   --allow-public-bind      permit binding a globally routable address (not
                            recommended; the Agent refuses public binds by default)
@@ -179,6 +182,7 @@ parse_args() {
       --agent) add_agent_spec "${2:?}"; shift 2 ;;
       --token) AGENT_TOKEN="${2:?}"; shift 2 ;;
       --nexttrace) NEXTTRACE_PATH="${2:?}"; shift 2 ;;
+      --node-id) AGENT_NODE_ID="${2:?}"; shift 2 ;;
       --protocols) PROTOCOLS="${2:?}"; shift 2 ;;
       --allow-public-bind) ALLOW_PUBLIC_BIND=1; shift ;;
       *) die "unknown option: $1 (see --help)" ;;
@@ -299,9 +303,12 @@ write_agent_config() {
     backup_existing "$config"
     local public="false"
     [[ "$ALLOW_PUBLIC_BIND" -eq 1 ]] && public="true"
-    local node_id
-    node_id="$(hostname 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | cut -c1-32 | sed 's/^-*//; s/-*$//')"
-    [[ -n "$node_id" ]] || node_id="tracecat-agent"
+    local node_id="$AGENT_NODE_ID"
+    if [[ -z "$node_id" ]]; then
+      node_id="$(hostname 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | cut -c1-32 | sed 's/^-*//; s/-*$//')"
+      [[ -n "$node_id" ]] || node_id="tracecat-agent"
+    fi
+    [[ "$node_id" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || die "invalid --node-id (want ^[a-z0-9][a-z0-9_-]{0,31}$): $node_id"
     cat >"$config" <<EOF
 {
   "node_id": "$node_id",

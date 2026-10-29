@@ -68,7 +68,7 @@ jobs:
             cp configs/controller.example.json "stage/controller-${arch}/configs/"
             cp deploy/systemd/tracecat-controller.service deploy/systemd/tracecat-controller.env.example \
               "stage/controller-${arch}/deploy/systemd/"
-            cp deploy/install.sh QUICKSTART.md CHANGELOG.md LICENSE NOTICE README.md SECURITY.md "stage/controller-${arch}/"
+            cp deploy/install.sh deploy/quickstart.sh QUICKSTART.md CHANGELOG.md LICENSE NOTICE README.md SECURITY.md "stage/controller-${arch}/"
             cp -r docs "stage/controller-${arch}/"
             rm -rf "stage/controller-${arch}/docs/screenshots"
             printf '%s\n' "${VERSION}" > "stage/controller-${arch}/VERSION"
@@ -81,7 +81,7 @@ jobs:
             cp configs/agent.example.json "stage/agent-${arch}/configs/"
             cp deploy/systemd/tracecat-agent.service deploy/systemd/tracecat-agent.env.example \
               "stage/agent-${arch}/deploy/systemd/"
-            cp deploy/install.sh QUICKSTART.md CHANGELOG.md LICENSE NOTICE README.md SECURITY.md "stage/agent-${arch}/"
+            cp deploy/install.sh deploy/quickstart.sh QUICKSTART.md CHANGELOG.md LICENSE NOTICE README.md SECURITY.md "stage/agent-${arch}/"
             cp -r docs "stage/agent-${arch}/"
             rm -rf "stage/agent-${arch}/docs/screenshots"
             printf '%s\n' "${VERSION}" > "stage/agent-${arch}/VERSION"

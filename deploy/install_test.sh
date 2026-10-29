@@ -80,12 +80,28 @@ for bad in "8443" "10.0.0.5" "0.0.0.0:notaport"; do
 done
 
 bash -n "$ROOT/deploy/install.sh" || { echo "FAIL: install.sh syntax"; fail=1; }
+bash -n "$ROOT/deploy/quickstart.sh" || { echo "FAIL: quickstart.sh syntax"; fail=1; }
+if bash "$ROOT/deploy/quickstart.sh" --help >/dev/null 2>&1; then :; else
+  echo "FAIL: quickstart.sh --help did not exit 0"; fail=1
+fi
 
 # No trailing `[[ ... ]] && log ...` idiom that makes a successful install
 # function return 1 under `set -e` when the condition is false.
 if grep -nE '^[[:space:]]*\[\[ .* \]\] && (log|warn|echo)' "$ROOT/deploy/install.sh" >/dev/null; then
   echo "FAIL: installer has a trailing conditional-log idiom (exit-status hazard)"; fail=1
 fi
+
+# Node-id validation used by quickstart/install.sh.
+for good in local node-1 a1; do
+  if [[ "$good" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]]; then :; else
+    echo "FAIL: valid node id rejected: $good"; fail=1
+  fi
+done
+for bad in "Local" "-node" "node id" "node.name"; do
+  if [[ "$bad" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]]; then
+    echo "FAIL: invalid node id accepted: $bad"; fail=1
+  fi
+done
 
 # --help must exit 0; an unknown option must exit non-zero.
 if bash "$ROOT/deploy/install.sh" --help >/dev/null 2>&1; then :; else

@@ -47,7 +47,7 @@ for arch in "${ARCHES[@]}"; do
     cp "configs/${component}.example.json" "$stage_dir/configs/"
     cp "deploy/systemd/tracecat-${component}.service" \
        "deploy/systemd/tracecat-${component}.env.example" "$stage_dir/deploy/systemd/"
-    cp deploy/install.sh QUICKSTART.md CHANGELOG.md LICENSE NOTICE README.md SECURITY.md "$stage_dir/"
+    cp deploy/install.sh deploy/quickstart.sh QUICKSTART.md CHANGELOG.md LICENSE NOTICE README.md SECURITY.md "$stage_dir/"
     cp -r docs "$stage_dir/"
     rm -rf "$stage_dir/docs/screenshots"
     printf '%s\n' "$VERSION" >"$stage_dir/VERSION"

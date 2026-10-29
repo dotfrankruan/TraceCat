@@ -719,6 +719,21 @@ EOF
   return 0
 }
 
+# ensure_enrollment_supported rejects release binaries older than v0.1.2, which
+# predate the enrollment config field and would exit at startup with an opaque
+# JSON error. Source builds report a dev/commit version and are accepted.
+ensure_enrollment_supported() {
+  local bin="$TREE/bin/tracecat-controller" v
+  [[ -x "$bin" ]] || return 0
+  v="$("$bin" -version 2>/dev/null | awk '{print $2}')"
+  if [[ "$v" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    local maj="${BASH_REMATCH[1]}" min="${BASH_REMATCH[2]}" pat="${BASH_REMATCH[3]}"
+    if (( maj == 0 && (min < 1 || (min == 1 && pat < 2)) )); then
+      die "controller $v predates automatic enrollment; rerun with --version 0.1.2 or newer (or add --no-enrollment)"
+    fi
+  fi
+}
+
 main() {
   # Argument parsing (including --help) works without root; privileged actions
   # start only after validation succeeds.
@@ -726,6 +741,9 @@ main() {
   need_root
   for cmd in install systemctl tar awk sed grep; do need_cmd "$cmd"; done
   prepare_tree
+  if [[ "$COMPONENT" == "controller" && "$ENROLLMENT" -eq 1 ]]; then
+    ensure_enrollment_supported
+  fi
   create_user_and_dirs
   install_common
   case "$COMPONENT" in

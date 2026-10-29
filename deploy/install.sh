@@ -704,8 +704,7 @@ EOF
 
 Automatic Agent enrollment is enabled. On each Agent host run:
 
-  TRACECAT_ENROLLMENT_TOKEN='${enrollment_token}' \
-  sudo -E bash install.sh agent --controller 'http://${enroll_url}'
+  TRACECAT_ENROLLMENT_TOKEN='${enrollment_token}' sudo -E bash install.sh agent --controller 'http://${enroll_url}'
   # use https://<public-origin> instead if Agents reach the Controller over TLS
 
 Agents appear in the dashboard automatically; no --agent list is needed.

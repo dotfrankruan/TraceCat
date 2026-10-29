@@ -260,10 +260,16 @@ prepare_tree() {
     else
       base="https://github.com/$REPO/releases/latest/download"
     fi
-    local asset="tracecat-${COMPONENT}-linux-${arch}.tar.gz"
+    local asset="tracecat-${COMPONENT}-linux-${arch}.tar.gz" attempt=0
     log "downloading $asset ..."
-    curl -fsSL --retry 3 --proto '=https' -o "$TMPDIR/asset.tar.gz" "$base/$asset" \
-      || die "download failed: $base/$asset"
+    until curl -fsSL --retry 3 --proto '=https' -o "$TMPDIR/asset.tar.gz" "$base/$asset"; do
+      attempt=$((attempt + 1))
+      if [[ "$attempt" -ge 3 ]]; then
+        die "download failed: $base/$asset (if a release was just published its assets may still be uploading; wait a minute and retry, or pin --version)"
+      fi
+      warn "download failed; retrying in 5s (attempt $attempt/3)"
+      sleep 5
+    done
     tarball="$TMPDIR/asset.tar.gz"
     if [[ -z "$checksums" ]]; then
       if curl -fsSL --retry 3 --proto '=https' -o "$TMPDIR/checksums.txt" "$base/checksums.txt"; then

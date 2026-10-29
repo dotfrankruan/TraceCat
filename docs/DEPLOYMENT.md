@@ -18,8 +18,9 @@ instructions follow for custom setups.
 # Single host, one command (Controller + Agent on loopback, local auth):
 curl -fsSL https://raw.githubusercontent.com/dotfrankruan/TraceCat/main/deploy/quickstart.sh | sudo bash
 
-# Distributed: run this on each Agent host, then on the Controller host.
-sudo bash /tmp/tracecat-install.sh agent --listen 10.0.0.5:8443
+# Distributed: run this on each Agent host (auto-detects a private IP:8443;
+# pass --listen <ip>:8443 to override). It prints the token and --agent line.
+sudo bash /tmp/tracecat-install.sh agent
 sudo -E bash /tmp/tracecat-install.sh controller --auth cloudflare \
   --public-origin https://trace.example.com \
   --cf-team-domain https://your-team.cloudflareaccess.com --cf-audience AUD_TAG \

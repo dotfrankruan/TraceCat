@@ -75,7 +75,12 @@ the dashboard URL and login password:
 curl -fsSL https://raw.githubusercontent.com/dotfrankruan/TraceCat/main/deploy/quickstart.sh | sudo bash
 ```
 
-That is the whole setup for a single-host trial. For development from source:
+That is the whole setup for a **single-host trial**. To add Agents on other
+machines, run `deploy/install.sh agent` on each of them (no flags needed) and
+add the printed `--agent` line to the Controller install — see
+[QUICKSTART.md](QUICKSTART.md#add-agents-on-other-machines-multi-host).
+
+For development from source:
 
 ```bash
 make build

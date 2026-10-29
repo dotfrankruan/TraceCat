@@ -25,6 +25,50 @@ Open the URL, log in with that password, then:
 That's it. Data lives in `/var/lib/tracecat/controller.db`; services are
 `tracecat-controller` and `tracecat-agent`.
 
+## Add Agents on other machines (multi-host)
+
+The one-command quickstart above installs **one** local Agent for a single-host
+trial. To add Agents on other hosts, run this on **each Agent host** (NextTrace
+installed):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dotfrankruan/TraceCat/main/deploy/install.sh -o /tmp/tc-install.sh
+sudo bash /tmp/tc-install.sh agent
+```
+
+It auto-detects a private IPv4 on port 8443, installs the systemd service, and
+prints something like:
+
+```
+Add this Agent to the Controller host:
+
+  export TRACECAT_TOKEN_TOKYO='<token>'
+
+  then on the Controller host run deploy/install.sh controller with:
+    --agent 'tokyo,http://10.0.0.5:8443,TRACECAT_TOKEN_TOKYO,agent-host-1'
+```
+
+Then on the **Controller host**, run the Controller installer with one
+`--agent` argument per printed Agent (repeat `--agent`), exporting the tokens
+first:
+
+```bash
+export TRACECAT_TOKEN_TOKYO='<token from the Tokyo host>'
+export TRACECAT_TOKEN_FRANKFURT='<token from the Frankfurt host>'
+
+sudo -E bash /tmp/tc-install.sh controller \
+  --auth local \
+  --listen 127.0.0.1:8080 --public-origin https://trace.example.com \
+  --agent 'tokyo,http://10.0.0.5:8443,TRACECAT_TOKEN_TOKYO,Tokyo' \
+  --agent 'frankfurt,http://10.0.0.6:8443,TRACECAT_TOKEN_FRANKFURT,Frankfurt'
+```
+
+For the Controller `--public-origin`, use the HTTPS URL you will actually visit
+(Cloudflare Tunnel/Access, or a reverse proxy). If you only access it locally,
+use `--listen 127.0.0.1:8080 --public-origin http://127.0.0.1:8080` and an SSH
+tunnel (`ssh -L 8080:127.0.0.1:8080 controller-host`). Full options:
+[docs/DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## Run from source instead (developers)
 
 ```bash

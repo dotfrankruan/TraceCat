@@ -80,8 +80,8 @@ Controller options:
                            Controller host holding that Agent's bearer token.
 
 Agent options:
-  --listen <ip:port>       required; an assigned non-public address, e.g.
-                           10.0.0.5:8443 or 127.0.0.1:9481
+  --listen <ip:port>       bind address (default: auto-detected private IPv4
+                           on port 8443, e.g. 10.0.0.5:8443)
   --token <token>          bearer token (default: generate a random one)
   --nexttrace <path>       NextTrace binary (default: discover in PATH)
   --node-id <id>           Agent node id (default: hostname; must match the
@@ -126,6 +126,23 @@ detect_arch() {
     aarch64|arm64) echo arm64 ;;
     *) die "unsupported architecture: $(uname -m)" ;;
   esac
+}
+
+# detect_private_ip picks a usable non-loopback IPv4 address, preferring
+# RFC1918/CGNAT ranges and skipping container/bridge interfaces.
+detect_private_ip() {
+  command -v ip >/dev/null 2>&1 || return 0
+  local addrs private
+  addrs="$(ip -4 -o addr show scope global 2>/dev/null | awk '
+    $2 !~ /^(lo|docker|veth|br-|virbr|bridge|vmnet|vboxnet|cni|flannel|calico|podman|lxc|lxd|kube)/ {
+      split($4, a, "/"); print a[1]
+    }')"
+  private="$(printf '%s\n' "$addrs" | grep -E '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.)' | head -1)"
+  if [[ -n "$private" ]]; then
+    printf '%s\n' "$private"
+  else
+    printf '%s\n' "$addrs" | head -1
+  fi
 }
 
 generate_token() {
@@ -286,7 +303,13 @@ backup_existing() {
 }
 
 write_agent_config() {
-  [[ -n "$AGENT_LISTEN" ]] || die "agent --listen is required (e.g. 10.0.0.5:8443)"
+  if [[ -z "$AGENT_LISTEN" ]]; then
+    local detected
+    detected="$(detect_private_ip)"
+    [[ -n "$detected" ]] || die "could not auto-detect an address; pass --listen <private-ip>:8443"
+    AGENT_LISTEN="${detected}:8443"
+    log "auto-detected listen address: $AGENT_LISTEN"
+  fi
   [[ "$AGENT_LISTEN" =~ ^(\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f:.]+):[0-9]{1,5}$ ]] || die "invalid --listen (expected ip:port): $AGENT_LISTEN"
 
   NEXTTRACE_PATH="${NEXTTRACE_PATH:-$(command -v nexttrace || true)}"
@@ -366,13 +389,22 @@ EOF
     systemctl daemon-reload
     systemctl enable --now tracecat-agent
     log "tracecat-agent enabled and started"
-    log "configure the Controller host with:"
-    echo
-    echo "    token_env: TRACECAT_AGENT_TOKEN"
-    echo "    token     : $(sed -n 's/^TRACECAT_AGENT_TOKEN=//p' "$envfile")"
-    echo "    url       : http://$AGENT_LISTEN"
-    echo
-    warn "treat the token as a secret; it is visible in this terminal only"
+    local token_value node_value env_name
+    token_value="$(sed -n 's/^TRACECAT_AGENT_TOKEN=//p' "$envfile" | head -1)"
+    node_value="$(sed -n 's/.*"node_id": "\([^"]*\)".*/\1/p' "$config" | head -1)"
+    node_value="${node_value:-agent}"
+    env_name="TRACECAT_TOKEN_$(printf '%s' "$node_value" | tr 'a-z-' 'A-Z_')"
+    cat <<EOF
+
+Add this Agent to the Controller host:
+
+  export ${env_name}='${token_value}'
+
+  then on the Controller host run deploy/install.sh controller with:
+    --agent '${node_value},http://${AGENT_LISTEN},${env_name},$(hostname)'
+
+(the token is a secret; it is shown once and stored only in $envfile)
+EOF
   else
     systemctl daemon-reload
     log "installed; start later with: systemctl enable --now tracecat-agent"

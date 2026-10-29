@@ -1,63 +1,58 @@
 # TraceCat Quick Start
 
-One command on a Linux host (systemd + NextTrace installed):
+TraceCat runs **one Controller and any number of Agents**. Agents register
+themselves automatically — there is no machine list to maintain.
+
+## 1. Controller (one host)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dotfrankruan/TraceCat/main/deploy/install.sh -o /tmp/tc-install.sh
+sudo bash /tmp/tc-install.sh controller \
+  --auth local \
+  --listen 10.0.0.10:8080 \
+  --public-origin https://trace.example.com
+```
+
+- `--listen` is the private address Agents use to reach the Controller (an
+  overlay/VPC address is ideal). The browser URL stays the HTTPS
+  `--public-origin` (Cloudflare Tunnel/Access or a reverse proxy).
+- Enrollment is **on by default**. The installer prints an enrollment token and
+  the exact Agent command. Keep that token secret.
+
+## 2. Agents (each additional host)
+
+On every Agent host, with [NextTrace](https://github.com/nxtrace/NTrace-core)
+installed:
+
+```bash
+TRACECAT_ENROLLMENT_TOKEN='<token printed by the Controller>' \
+  sudo -E bash /tmp/tc-install.sh agent \
+  --controller http://10.0.0.10:8080
+```
+
+That is all. The Agent dials the Controller, receives its own trace token, and
+shows up automatically in the dashboard. Repeat on as many hosts as you want;
+they appear without editing the Controller configuration or restarting it.
+Agents re-register/refresh automatically.
+
+Open the Controller URL, log in, then:
+
+1. Enter `1.1.1.1` (or a domain) and press **Resolve**.
+2. Pick the destination IP if more than one is offered.
+3. Select one or more Agents, choose **ICMP**, **TCP** (port 443) or **UDP**
+   (port 33494), and press **Start trace**.
+
+## Single-host demo (optional)
+
+To try everything on one machine without TLS or a private network:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/dotfrankruan/TraceCat/main/deploy/quickstart.sh | sudo bash
 ```
 
-It installs the Controller and one Agent as loopback-only systemd services,
-generates a random login password and prints:
-
-```
-TraceCat is running.
-  URL       http://127.0.0.1:8080
-  Password  <generated>
-```
-
-Open the URL, log in with that password, then:
-
-1. Enter `1.1.1.1` (or a domain) and press **Resolve**.
-2. Pick the destination IP if more than one is offered.
-3. Select the Agent, choose **ICMP**, **TCP** (port 443) or **UDP** (port 33494),
-   and press **Start trace**.
-
-That's it. Data lives in `/var/lib/tracecat/controller.db`; services are
-`tracecat-controller` and `tracecat-agent`.
-
-## Add Agents on other machines (multi-host, automatic)
-
-Agents introduce themselves to the Controller — you do **not** list machines on
-the Controller command line.
-
-**On the Controller host**, enable enrollment (it prints a token and the exact
-Agent command):
-
-```bash
-sudo bash /tmp/tc-install.sh controller --enrollment --auth local \
-  --listen 10.0.0.10:8080 --public-origin https://trace.example.com
-```
-
-Use an address the Agents can reach for `--listen` (private overlay/VPC is
-ideal); the browser URL stays the HTTPS `--public-origin`.
-
-**On each Agent host** (NextTrace installed), run the command it printed:
-
-```bash
-TRACECAT_ENROLLMENT_TOKEN='<token from the Controller>' \
-  sudo -E bash /tmp/tc-install.sh agent --controller http://10.0.0.10:8080
-```
-
-That's it: the Agent registers itself, receives its own trace token, and appears
-in the dashboard automatically (no Controller restart, no `--agent` flags).
-Agents refresh registration automatically. The enrollment token is a shared
-secret: keep it out of shell history where possible and rotate it by restarting
-the Controller with a new token.
-
-Pre-registering specific Agents with `--agent id,url,token_env` is still
-supported for locked-down setups; statically configured Agents take precedence
-over auto-registered ones with the same id. Details:
-[docs/DEPLOYMENT.md](DEPLOYMENT.md).
+It installs a loopback-only Controller + Agent and prints a generated password
+and URL. This is just a demo; the multi-Agent setup above is the normal
+deployment.
 
 ## Run from source instead (developers)
 
@@ -89,15 +84,15 @@ systemctl restart tracecat-controller tracecat-agent
 
 | Symptom | Fix |
 | --- | --- |
-| `Controller did not become healthy` | `journalctl -u tracecat-controller -n 50`; usually a port conflict or missing Agent token env |
-| Agent `listen address ... is not assigned` | the configured address is not on this host; use `127.0.0.1` for a single host or a real private IP |
+| `Controller did not become healthy` | `journalctl -u tracecat-controller -n 50`; usually a port conflict or missing token env |
+| Agent `listen address ... is not assigned` | the configured address is not on this host; use a real private IP or `127.0.0.1` for the demo |
+| Agent never appears | check `journalctl -u tracecat-agent`; it needs outbound access to the `--controller` URL and the correct `TRACECAT_ENROLLMENT_TOKEN` |
 | Probes fail with permission errors | grant `CAP_NET_RAW` to NextTrace (see `docs/DEPLOYMENT.md` §2.1) |
 | `target_rejected` | only globally routable unicast is allowed by default; configure `security.allowed_cidrs` on Controller and Agent for lab ranges |
 | Hops show **no reply** | common for intermediate routers; not proof of a broken route |
 
 ## Going further
 
-- **Multiple Agents / private network / production**: [docs/DEPLOYMENT.md](DEPLOYMENT.md)
-  (run `deploy/install.sh agent` on each host, then `deploy/install.sh controller`).
-- **Network options** (overlay, VPC, SSH tunnel; Tailscale optional): [docs/PRIVATE-NETWORKING.md](PRIVATE-NETWORKING.md)
+- **Private networking options** (overlay, VPC, SSH tunnel; Tailscale optional): [docs/PRIVATE-NETWORKING.md](PRIVATE-NETWORKING.md)
+- **Deployment reference / Cloudflare Access / systemd details**: [docs/DEPLOYMENT.md](DEPLOYMENT.md)
 - **API / security / verification**: [docs/API.md](API.md), [SECURITY.md](../SECURITY.md), [docs/VERIFICATION.md](VERIFICATION.md)

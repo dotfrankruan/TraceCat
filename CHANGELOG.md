@@ -14,9 +14,11 @@ schema versions (`tracecat.agent.v1`, `tracecat.controller.v1`).
   their own per-Agent trace token, and appear in the dashboard automatically;
   no machine list in the Controller command line or config. Registered Agents
   persist across restarts and static configuration still takes precedence.
-  The installer supports `controller --enrollment` and
-  `agent --controller <url>` with the enrollment token supplied via the
-  environment.
+  The installer enables enrollment by default for new Controllers
+  (`--no-enrollment` opts out); Agents install with
+  `agent --controller <url>` and the enrollment token supplied via the
+  environment. Multi-Agent is the documented default path; the one-command
+  quickstart is explicitly a single-host demo.
 - One-command quickstart (`deploy/quickstart.sh`): installs a loopback-only
   Controller + Agent, generates local-auth credentials, and prints the URL and
   password. README/QUICKSTART/DEPLOYMENT now lead with this path; the existing

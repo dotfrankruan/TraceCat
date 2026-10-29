@@ -18,8 +18,8 @@ instructions follow for custom setups.
 # Single host, one command (Controller + Agent on loopback, local auth):
 curl -fsSL https://raw.githubusercontent.com/dotfrankruan/TraceCat/main/deploy/quickstart.sh | sudo bash
 
-# Distributed: enable enrollment on the Controller once (prints the Agent command).
-sudo bash /tmp/tracecat-install.sh controller --enrollment --auth cloudflare \
+# Distributed (default): enrollment is on; the installer prints the Agent command.
+sudo bash /tmp/tracecat-install.sh controller --auth cloudflare \
   --listen 10.0.0.10:8080 --public-origin https://trace.example.com \
   --cf-team-domain https://your-team.cloudflareaccess.com --cf-audience AUD_TAG
 

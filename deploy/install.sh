@@ -35,7 +35,7 @@ CF_AUDIENCES=()
 CF_EMAILS=()
 CF_DOMAINS=()
 PASSWORD_STDIN=0
-ENROLLMENT=0
+ENROLLMENT=1
 AGENT_SPECS=()
 AGENT_SPEC_COUNT=0
 
@@ -80,8 +80,9 @@ Controller options:
   --cf-email <email>       allowed email (repeatable)
   --cf-domain <domain>     allowed email domain (repeatable)
   --password-stdin         read the local-auth password from stdin (min 12)
-  --enrollment             enable automatic Agent enrollment (no --agent list
+  --enrollment             automatic Agent enrollment (default; no --agent list
                            needed; the Controller prints an enrollment token)
+  --no-enrollment          disable enrollment; requires --agent pre-registration
   --agent <spec>           Agent entry, repeatable:
                              id,url,token_env[,name[,location[,provider]]]
                            token_env is an environment variable name on the
@@ -213,6 +214,7 @@ parse_args() {
       --cf-domain) CF_DOMAINS+=("${2:?}"); shift 2 ;;
       --password-stdin) PASSWORD_STDIN=1; shift ;;
       --enrollment) ENROLLMENT=1; shift ;;
+      --no-enrollment) ENROLLMENT=0; shift ;;
       --controller) CONTROLLER_URL="${2:?}"; shift 2 ;;
       --enroll-token-env) ENROLL_TOKEN_ENV="${2:?}"; shift 2 ;;
       --advertise-url) ADVERTISE_URL="${2:?}"; shift 2 ;;

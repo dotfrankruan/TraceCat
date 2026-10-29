@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# TraceCat one-command quickstart: Controller + Agent on this host.
+# TraceCat single-host demo: Controller + Agent on this host.
+#
+# Multiple Agents are the normal deployment: install the Controller with
+# deploy/install.sh controller (enrollment is on by default), then run
+# deploy/install.sh agent --controller <url> on each Agent host.
 #
 # Installs both components as systemd services on loopback, with a local-auth
 # password generated for you. Intended for a quick, safe single-host trial.

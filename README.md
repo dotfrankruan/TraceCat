@@ -65,22 +65,31 @@ shell, no user-controlled executable or flags, and no generic command API.
 | `internal/webui`, `web` | Embedded dashboard and its React/TS/Tailwind sources |
 | `deploy`, `configs`, `docs` | installer, systemd units, Docker, private-networking/Cloudflare guidance, API and security docs |
 
-## Quick start
+## Quick start (multi-Agent, default)
 
-On a Linux host with systemd and [NextTrace](https://github.com/nxtrace/NTrace-core)
-installed, one command installs a loopback-only Controller + Agent and prints
-the dashboard URL and login password:
+TraceCat runs one Controller and any number of Agents. Agents register
+themselves automatically over an enrollment token — no machine list.
+
+On the Controller host:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dotfrankruan/TraceCat/main/deploy/quickstart.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/dotfrankruan/TraceCat/main/deploy/install.sh -o /tmp/tc-install.sh
+sudo bash /tmp/tc-install.sh controller \
+  --auth local --listen 10.0.0.10:8080 \
+  --public-origin https://trace.example.com
+# prints the enrollment token and the exact Agent command
 ```
 
-That is the whole setup for a **single-host trial**. To add Agents on other
-machines, enable `--enrollment` on the Controller, then run
-`deploy/install.sh agent --controller <controller-url>` on each host — they
-register themselves and appear automatically (no machine lists on the command
-line). See
-[QUICKSTART.md](QUICKSTART.md#add-agents-on-other-machines-multi-host-automatic).
+On each Agent host (NextTrace installed):
+
+```bash
+TRACECAT_ENROLLMENT_TOKEN='<token from the Controller>' \
+  sudo -E bash /tmp/tc-install.sh agent --controller http://10.0.0.10:8080
+```
+
+Agents appear in the dashboard automatically, as many as you run. Enrollment is
+on by default; `--no-enrollment` requires static `--agent` pre-registration.
+For a one-machine demo, run `deploy/quickstart.sh` instead.
 
 For development from source:
 

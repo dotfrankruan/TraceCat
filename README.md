@@ -76,9 +76,11 @@ curl -fsSL https://raw.githubusercontent.com/dotfrankruan/TraceCat/main/deploy/q
 ```
 
 That is the whole setup for a **single-host trial**. To add Agents on other
-machines, run `deploy/install.sh agent` on each of them (no flags needed) and
-add the printed `--agent` line to the Controller install — see
-[QUICKSTART.md](QUICKSTART.md#add-agents-on-other-machines-multi-host).
+machines, enable `--enrollment` on the Controller, then run
+`deploy/install.sh agent --controller <controller-url>` on each host — they
+register themselves and appear automatically (no machine lists on the command
+line). See
+[QUICKSTART.md](QUICKSTART.md#add-agents-on-other-machines-multi-host-automatic).
 
 For development from source:
 

@@ -35,13 +35,19 @@ CF_AUDIENCES=()
 CF_EMAILS=()
 CF_DOMAINS=()
 PASSWORD_STDIN=0
+ENROLLMENT=0
 AGENT_SPECS=()
+AGENT_SPEC_COUNT=0
 
 # agent options
 AGENT_LISTEN=""
 AGENT_TOKEN=""
 AGENT_NODE_ID=""
+AGENT_NAME=""
 NEXTTRACE_PATH=""
+CONTROLLER_URL=""
+ENROLL_TOKEN_ENV="TRACECAT_ENROLLMENT_TOKEN"
+ADVERTISE_URL=""
 ALLOW_PUBLIC_BIND=0
 PROTOCOLS="icmp,tcp,udp"
 
@@ -74,6 +80,8 @@ Controller options:
   --cf-email <email>       allowed email (repeatable)
   --cf-domain <domain>     allowed email domain (repeatable)
   --password-stdin         read the local-auth password from stdin (min 12)
+  --enrollment             enable automatic Agent enrollment (no --agent list
+                           needed; the Controller prints an enrollment token)
   --agent <spec>           Agent entry, repeatable:
                              id,url,token_env[,name[,location[,provider]]]
                            token_env is an environment variable name on the
@@ -83,9 +91,16 @@ Agent options:
   --listen <ip:port>       bind address (default: auto-detected private IPv4
                            on port 8443, e.g. 10.0.0.5:8443)
   --token <token>          bearer token (default: generate a random one)
+  --controller <url>       Controller base URL; enables automatic enrollment
+                           (e.g. http://10.0.0.10:8080 or https://trace.example.com)
+  --enroll-token-env <n>    env var with the enrollment token (default
+                           TRACECAT_ENROLLMENT_TOKEN; the value is read from the
+                           environment, never from the command line)
+  --advertise-url <url>    URL the Controller should use to reach this Agent
+                           (default http://<listen>)
   --nexttrace <path>       NextTrace binary (default: discover in PATH)
-  --node-id <id>           Agent node id (default: hostname; must match the
-                           Controller's agents[].id)
+  --node-id <id>           Agent node id (default: hostname)
+  --name <name>            display name (default: hostname)
   --protocols <csv>        enabled protocols (default icmp,tcp,udp)
   --allow-public-bind      permit binding a globally routable address (not
                            recommended; the Agent refuses public binds by default)
@@ -169,6 +184,7 @@ add_agent_spec() {
   [[ -z "${location:-}" ]] || valid_simple "$location" "agent location"
   [[ -z "${provider:-}" ]] || valid_simple "$provider" "agent provider"
   AGENT_SPECS+=("$id|$url|$token_env|$name|${location:-}|${provider:-}")
+  AGENT_SPEC_COUNT=$((AGENT_SPEC_COUNT + 1))
 }
 
 parse_args() {
@@ -196,10 +212,15 @@ parse_args() {
       --cf-email) CF_EMAILS+=("${2:?}"); shift 2 ;;
       --cf-domain) CF_DOMAINS+=("${2:?}"); shift 2 ;;
       --password-stdin) PASSWORD_STDIN=1; shift ;;
+      --enrollment) ENROLLMENT=1; shift ;;
+      --controller) CONTROLLER_URL="${2:?}"; shift 2 ;;
+      --enroll-token-env) ENROLL_TOKEN_ENV="${2:?}"; shift 2 ;;
+      --advertise-url) ADVERTISE_URL="${2:?}"; shift 2 ;;
       --agent) add_agent_spec "${2:?}"; shift 2 ;;
       --token) AGENT_TOKEN="${2:?}"; shift 2 ;;
       --nexttrace) NEXTTRACE_PATH="${2:?}"; shift 2 ;;
       --node-id) AGENT_NODE_ID="${2:?}"; shift 2 ;;
+      --name) AGENT_NAME="${2:?}"; shift 2 ;;
       --protocols) PROTOCOLS="${2:?}"; shift 2 ;;
       --allow-public-bind) ALLOW_PUBLIC_BIND=1; shift ;;
       *) die "unknown option: $1 (see --help)" ;;
@@ -320,6 +341,25 @@ write_agent_config() {
   [[ "$PROTOCOLS" =~ ^(icmp|tcp|udp)(,(icmp|tcp|udp))*$ ]] || die "invalid --protocols (want csv of icmp,tcp,udp)"
 
   local config="$ETC_DIR/agent.json"
+  local enrollment_mode=0 enroll_token_value=""
+  if [[ -n "$CONTROLLER_URL" ]]; then
+    enrollment_mode=1
+    [[ "$CONTROLLER_URL" =~ ^https?://[][A-Za-z0-9._:/-]+/?$ ]] || die "invalid --controller URL"
+    [[ "$ENROLL_TOKEN_ENV" =~ ^[A-Z][A-Z0-9_]{0,127}$ ]] || die "invalid --enroll-token-env name"
+    enroll_token_value="${!ENROLL_TOKEN_ENV-}"
+    [[ ${#enroll_token_value} -ge 32 ]] || die "set $ENROLL_TOKEN_ENV (>=32 chars) in the environment to enroll this Agent"
+    if [[ -z "$ADVERTISE_URL" ]]; then
+      ADVERTISE_URL="http://$AGENT_LISTEN"
+    fi
+    [[ "$ADVERTISE_URL" =~ ^https?://[][A-Za-z0-9._:/-]+/?$ ]] || die "invalid --advertise-url"
+    if [[ "$AGENT_LISTEN" =~ ^127\. && "$CONTROLLER_URL" != *"127.0.0.1"* && "$CONTROLLER_URL" != *"localhost"* ]]; then
+      warn "Agent binds loopback but the Controller is remote; set --advertise-url to an address the Controller can reach (or bind a private IP)"
+    fi
+  fi
+
+  local node_name="${AGENT_NAME:-$(hostname 2>/dev/null || echo tracecat-agent)}"
+  valid_simple "$node_name" "--name"
+
   if [[ -f "$config" && "$FORCE" -eq 0 ]]; then
     warn "keeping existing $config (use --force to regenerate)"
   else
@@ -332,14 +372,27 @@ write_agent_config() {
       [[ -n "$node_id" ]] || node_id="tracecat-agent"
     fi
     [[ "$node_id" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || die "invalid --node-id (want ^[a-z0-9][a-z0-9_-]{0,31}$): $node_id"
+
+    local auth_json controller_json=""
+    if [[ "$enrollment_mode" -eq 1 ]]; then
+      auth_json='"auth": {}'
+      controller_json='"controller": {
+    "url": "'"$CONTROLLER_URL"'",
+    "enrollment_token_env": "'"$ENROLL_TOKEN_ENV"'",
+    "advertise_url": "'"$ADVERTISE_URL"'",
+    "name": "'"$(json_escape "$node_name")"'",
+    "refresh_seconds": 300
+  },'
+    else
+      auth_json='"auth": { "token_env": "TRACECAT_AGENT_TOKEN" }'
+    fi
+
     cat >"$config" <<EOF
 {
   "node_id": "$node_id",
-  "name": "$(hostname)",
+  "name": "$(json_escape "$node_name")",
   "listen": "$AGENT_LISTEN",
-  "auth": {
-    "token_env": "TRACECAT_AGENT_TOKEN"
-  },
+  $auth_json,
   "nexttrace": {
     "binary": "$NEXTTRACE_PATH",
     "max_concurrent_traces": 4,
@@ -354,6 +407,11 @@ write_agent_config() {
     "allow_private_targets": false,
     "allowed_cidrs": [],
     "allow_public_bind": $public
+  },
+  $controller_json
+  "interfaces": {
+    "exclude": [],
+    "include": []
   },
   "rate_limit": {
     "requests_per_minute": 60,
@@ -373,28 +431,31 @@ EOF
     warn "keeping existing $envfile"
   else
     backup_existing "$envfile"
-    [[ -n "$AGENT_TOKEN" ]] || AGENT_TOKEN="$(generate_token)"
-    valid_simple "$AGENT_TOKEN" "agent token"
-    ( umask 077; printf 'TRACECAT_AGENT_TOKEN=%s\n' "$AGENT_TOKEN" >"$envfile" )
+    if [[ "$enrollment_mode" -eq 1 ]]; then
+      ( umask 077; printf '%s=%s\n' "$ENROLL_TOKEN_ENV" "$enroll_token_value" >"$envfile" )
+    else
+      [[ -n "$AGENT_TOKEN" ]] || AGENT_TOKEN="$(generate_token)"
+      valid_simple "$AGENT_TOKEN" "agent token"
+      ( umask 077; printf 'TRACECAT_AGENT_TOKEN=%s\n' "$AGENT_TOKEN" >"$envfile" )
+    fi
     chmod 0600 "$envfile"
     chown root:root "$envfile"
     log "wrote $envfile (mode 0600)"
-  fi
-
-  if [[ ! -f "$TREE/deploy/systemd/tracecat-agent.env.example" ]]; then
-    warn "release tarball has no agent env example (continuing)"
   fi
 
   if [[ "$NO_START" -eq 0 ]]; then
     systemctl daemon-reload
     systemctl enable --now tracecat-agent
     log "tracecat-agent enabled and started"
-    local token_value node_value env_name
-    token_value="$(sed -n 's/^TRACECAT_AGENT_TOKEN=//p' "$envfile" | head -1)"
-    node_value="$(sed -n 's/.*"node_id": "\([^"]*\)".*/\1/p' "$config" | head -1)"
-    node_value="${node_value:-agent}"
-    env_name="TRACECAT_TOKEN_$(printf '%s' "$node_value" | tr 'a-z-' 'A-Z_')"
-    cat <<EOF
+    if [[ "$enrollment_mode" -eq 1 ]]; then
+      log "Agent will register itself with $CONTROLLER_URL; it appears in the dashboard automatically"
+    else
+      local token_value node_value env_name
+      token_value="$(sed -n 's/^TRACECAT_AGENT_TOKEN=//p' "$envfile" | head -1)"
+      node_value="$(sed -n 's/.*"node_id": "\([^"]*\)".*/\1/p' "$config" | head -1)"
+      node_value="${node_value:-agent}"
+      env_name="TRACECAT_TOKEN_$(printf '%s' "$node_value" | tr 'a-z-' 'A-Z_')"
+      cat <<EOF
 
 Add this Agent to the Controller host:
 
@@ -402,9 +463,8 @@ Add this Agent to the Controller host:
 
   then on the Controller host run deploy/install.sh controller with:
     --agent '${node_value},http://${AGENT_LISTEN},${env_name},$(hostname)'
-
-(the token is a secret; it is shown once and stored only in $envfile)
 EOF
+    fi
   else
     systemctl daemon-reload
     log "installed; start later with: systemctl enable --now tracecat-agent"
@@ -425,7 +485,28 @@ write_controller_config() {
   [[ "$PUBLIC_ORIGIN" =~ ^https?://[][A-Za-z0-9._:/-]+/?$ ]] || die "invalid --public-origin"
   valid_simple "$PUBLIC_ORIGIN" "--public-origin"
 
-  [[ ${#AGENT_SPECS[@]} -gt 0 ]] || die "at least one --agent id,url,token_env is required"
+  if [[ "$AGENT_SPEC_COUNT" -eq 0 && "$ENROLLMENT" -eq 0 ]]; then
+    die "provide at least one --agent id,url,token_env, or use --enrollment for automatic registration"
+  fi
+  if [[ "$ENROLLMENT" -eq 1 ]]; then
+    if [[ "$CONTROLLER_LISTEN" == "127.0.0.1:8080" || "$CONTROLLER_LISTEN" == "[::1]:8080" ]]; then
+      local detected; detected="$(detect_private_ip)"
+      [[ -n "$detected" ]] || die "--enrollment needs a reachable --listen address; pass --listen <private-ip>:8080"
+      CONTROLLER_LISTEN="${detected}:8080"
+      log "auto-selected Controller listen address for enrollment: $CONTROLLER_LISTEN"
+    fi
+  fi
+  local enrollment_token="" enrollment_json=""
+  if [[ "$ENROLLMENT" -eq 1 ]]; then
+    enrollment_token="${TRACECAT_ENROLLMENT_TOKEN:-}"
+    [[ -n "$enrollment_token" ]] || enrollment_token="$(generate_token)"
+    [[ ${#enrollment_token} -ge 32 ]] || die "enrollment token must be at least 32 characters"
+    enrollment_json='"enrollment": {
+    "enabled": true,
+    "token_env": "TRACECAT_ENROLLMENT_TOKEN",
+    "refresh_after_seconds": 300
+  },'
+  fi
 
   local config="$ETC_DIR/controller.json"
   local envfile="$ETC_DIR/controller.env"
@@ -521,6 +602,7 @@ EOF
     esac
     cat <<EOF
   },
+  ${enrollment_json}
   "database": {
     "path": "$STATE_DIR/controller.db",
     "max_history_jobs": 200
@@ -545,7 +627,7 @@ EOF
   "agents": [
 EOF
     local idx=0 spec id url token_env name location provider
-    for spec in "${AGENT_SPECS[@]}"; do
+    for spec in ${AGENT_SPECS[@]+"${AGENT_SPECS[@]}"}; do
       IFS='|' read -r id url token_env name location provider <<<"$spec"
       [[ "$idx" -gt 0 ]] && printf ',\n'
       printf '    {\n'
@@ -583,7 +665,10 @@ EOF
     if [[ "$AUTH_MODE" == "cloudflare" ]]; then
       printf 'TRACECAT_CSRF_SECRET=%s\n' "$csrf_secret"
     fi
-    for spec in "${AGENT_SPECS[@]}"; do
+    if [[ "$ENROLLMENT" -eq 1 ]]; then
+      printf 'TRACECAT_ENROLLMENT_TOKEN=%s\n' "$enrollment_token"
+    fi
+    for spec in ${AGENT_SPECS[@]+"${AGENT_SPECS[@]}"}; do
       IFS='|' read -r id url token_env name location provider <<<"$spec"
       token_value="${!token_env-}"
       if [[ -n "$token_value" ]]; then
@@ -612,6 +697,19 @@ EOF
     log "listening on $CONTROLLER_LISTEN (public origin $PUBLIC_ORIGIN)"
     if [[ "$AUTH_MODE" == "cloudflare" ]]; then
       log "put the Access JWT verification settings in $config and the csrf secret in $envfile"
+    fi
+    if [[ "$ENROLLMENT" -eq 1 ]]; then
+      local enroll_url="$CONTROLLER_LISTEN"
+      cat <<EOF
+
+Automatic Agent enrollment is enabled. On each Agent host run:
+
+  TRACECAT_ENROLLMENT_TOKEN='${enrollment_token}' \
+  sudo -E bash install.sh agent --controller 'http://${enroll_url}'
+  # use https://<public-origin> instead if Agents reach the Controller over TLS
+
+Agents appear in the dashboard automatically; no --agent list is needed.
+EOF
     fi
   else
     systemctl daemon-reload

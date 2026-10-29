@@ -8,6 +8,15 @@ schema versions (`tracecat.agent.v1`, `tracecat.controller.v1`).
 
 ### Added
 
+- **Automatic Agent enrollment.** Agents can register themselves with the
+  Controller over an authenticated enrollment endpoint
+  (`POST /api/v1/agents/enroll`, high-entropy shared enrollment token), receive
+  their own per-Agent trace token, and appear in the dashboard automatically;
+  no machine list in the Controller command line or config. Registered Agents
+  persist across restarts and static configuration still takes precedence.
+  The installer supports `controller --enrollment` and
+  `agent --controller <url>` with the enrollment token supplied via the
+  environment.
 - One-command quickstart (`deploy/quickstart.sh`): installs a loopback-only
   Controller + Agent, generates local-auth credentials, and prints the URL and
   password. README/QUICKSTART/DEPLOYMENT now lead with this path; the existing

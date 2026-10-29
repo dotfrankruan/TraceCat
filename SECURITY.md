@@ -209,12 +209,25 @@ extension-less GET paths; HTML never cached; hashed assets cached immutably.
 
 ### T14. Open proxy / arbitrary Agent registration
 **Threat:** making the Controller fetch or relay arbitrary URLs, or letting
-users add nodes.
-**Controls:** Agent endpoints are administrative configuration only; there is
-no registration endpoint; user input never becomes a URL; outbound HTTP client
-disables redirects and targets only configured Agent base URLs; no generic
-"fetch URL" feature exists. Cleartext Agent URLs are only accepted for
-non-public/Tailscale addresses.
+untrusted users add nodes.
+**Controls:** there is exactly one registration route
+(`POST /api/v1/agents/enroll`) and it is **not browser-authenticated**: it
+requires a high-entropy, constant-time-checked enrollment token from the
+Controller environment, is body-capped and strict-JSON, and is rate-limited
+per IP. Only Agents can call it; browser users cannot add nodes. The advertised
+URL passes the same transport policy as static Agent configuration (`https`
+required for hostnames/public IPs; cleartext `http` only for literal
+non-public/loopback addresses; no credentials/query/fragment/path), Agent
+credentials are never accepted from users, and statically configured node ids
+cannot be overwritten by enrollment. The Controller issues a fresh per-Agent
+trace token on every enrollment and stores it only in its protected SQLite
+directory. Outbound HTTP disables redirects and targets only registered Agent
+base URLs; there is no generic "fetch URL" feature.
+**Residual:** the enrollment token is a shared secret. Anyone who obtains it
+can register an Agent id and URL (subject to the URL policy) and therefore make
+the Controller send health/trace requests to that URL. Rotate the token by
+restarting the Controller with a new value, keep it out of shell history/CI
+logs, and disable enrollment when not in use.
 
 ### T15. Supply chain
 **Threat:** compromised Go/npm dependencies or build artifacts.

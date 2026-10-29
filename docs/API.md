@@ -360,6 +360,8 @@ Administratively configured Agents only; no user-supplied Agent URLs exist.
 `health` is `ok`, `degraded`, `unreachable`, `unknown` or `disabled`. It is
 derived from recent authenticated health checks; it is not user-controllable.
 `interfaces` is the Agent-reported interface list (empty when unavailable).
+`source` is `static` for administratively configured Agents and `auto` for
+Agents that registered themselves via `/api/v1/agents/enroll`.
 
 ### 2.6 `POST /api/v1/resolve`
 
@@ -566,7 +568,67 @@ Returns a `Content-Disposition: attachment` JSON document:
 Raw NextTrace results are included only here, and only for authenticated
 users. They are bounded and never interpreted as HTML.
 
-### 2.13 `GET /healthz`
+### 2.13 `POST /api/v1/agents/enroll` (Agent-only, automatic registration)
+
+This is the only Controller endpoint that is not called by a browser. Agents call
+it on startup and periodically to register themselves, so administrators do not
+maintain a machine list in the Controller configuration. It is authenticated by
+a separate high-entropy **enrollment token** (`enrollment.token_env` on the
+Controller, `controller.enrollment_token_env` on the Agent), never by browser
+sessions/CSRF/JWTs.
+
+```
+Authorization: Bearer <enrollment-token>
+Content-Type: application/json
+```
+
+```json
+{
+  "schema_version": "tracecat.agent.v1",
+  "node_id": "tokyo-1",
+  "name": "Tokyo",
+  "location": "Tokyo, JP",
+  "provider": "DMIT",
+  "url": "http://10.0.0.5:8443",
+  "nexttrace_version": "v1.7.3",
+  "protocols": ["icmp", "tcp", "udp"]
+}
+```
+
+The Controller:
+
+1. checks the enrollment token in constant time (and rate-limits attempts);
+2. validates `node_id`, display strings and the advertised `url` using the same
+   transport rules as statically configured Agents (`https` for hostnames and
+   public IPs; plain `http` only for literal private/loopback addresses; no
+   credentials/query/fragment/path);
+3. rejects the request if `node_id` belongs to a statically configured Agent
+   (static configuration always wins);
+4. creates or updates the registered Agent and returns a newly generated
+   per-Agent trace token:
+
+```json
+{
+  "schema_version": "tracecat.controller.v1",
+  "node_id": "tokyo-1",
+  "agent_token": "<generated per-Agent bearer token>",
+  "trace_url": "http://10.0.0.5:8443",
+  "refresh_after_seconds": 300
+}
+```
+
+The Agent keeps the token in memory and uses it for the existing Controller→Agent
+`/v1/health` and `/v1/trace` calls. Re-enrollment rotates the token; the previous
+token stops working. The Controller persists registered Agents (and their
+tokens, needed to call them) in its protected SQLite directory, so they survive
+restarts.
+
+Registered nodes appear in `GET /api/v1/nodes` with `"source": "auto"` and are
+immediately eligible for traces; statically configured nodes report
+`"source": "static"`. This endpoint rejects browser credentials and never returns
+static Agent tokens.
+
+### 2.14 `GET /healthz`
 
 Unauthenticated liveness only:
 

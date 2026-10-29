@@ -103,6 +103,16 @@ for bad in "Local" "-node" "node id" "node.name"; do
   fi
 done
 
+# Enrollment-mode flags parse without requiring an --agent machine list.
+if ! ( parse_args controller --enrollment --auth local --listen 10.0.0.5:8080 \
+        --public-origin https://trace.example.com ) 2>/dev/null; then
+  echo "FAIL: controller --enrollment parse failed"; fail=1
+fi
+if ! ( export TRACECAT_ENROLLMENT_TOKEN="$(head -c 48 /dev/urandom | base64 | tr -d '\n')"
+      parse_args agent --controller http://10.0.0.5:8080 --listen 10.0.0.5:8443 ) 2>/dev/null; then
+  echo "FAIL: agent --controller parse failed"; fail=1
+fi
+
 # --help must exit 0; an unknown option must exit non-zero.
 if bash "$ROOT/deploy/install.sh" --help >/dev/null 2>&1; then :; else
   echo "FAIL: install.sh --help did not exit 0"; fail=1

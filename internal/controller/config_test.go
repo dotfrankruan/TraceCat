@@ -684,6 +684,9 @@ func TestShippedExampleConfigsLoad(t *testing.T) {
 		if strings.Join(got, ",") != strings.Join(wantProtocols, ",") {
 			t.Fatalf("shipped config protocols = %v, want %v", got, wantProtocols)
 		}
+		if cfg.EnrollmentEnabled() {
+			t.Fatalf("shipped configs should ship with auto-enrollment disabled")
+		}
 	}
 }
 
@@ -747,4 +750,126 @@ func TestSecurityAllowlistRejectsBadConfig(t *testing.T) {
 			t.Errorf("allowed_cidrs %v: expected startup error", cidrs)
 		}
 	}
+}
+
+func TestEnrollmentConfigValidation(t *testing.T) {
+	const envName = "TRACECAT_TEST_ENROLLMENT_TOKEN"
+	const token = "enrollment-secret-0123456789abcdef0123456789"
+
+	withEnrollment := func(t *testing.T, tokenEnv string, refresh int, secret string) map[string]any {
+		t.Helper()
+		setAgentTokenEnv(t)
+		if secret != "" {
+			t.Setenv(envName, secret)
+		}
+		doc := baseDevConfigDoc()
+		enrollment := map[string]any{"enabled": true}
+		if tokenEnv != "" {
+			enrollment["token_env"] = tokenEnv
+		}
+		if refresh != 0 {
+			enrollment["refresh_after_seconds"] = refresh
+		}
+		doc["enrollment"] = enrollment
+		return doc
+	}
+
+	t.Run("valid enabled", func(t *testing.T) {
+		cfg, err := LoadConfig(writeConfigDoc(t, withEnrollment(t, envName, 0, token)))
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if !cfg.EnrollmentEnabled() {
+			t.Fatal("enrollment should be enabled")
+		}
+		if cfg.EnrollmentRefreshSeconds() != 300 {
+			t.Fatalf("refresh = %d, want default 300", cfg.EnrollmentRefreshSeconds())
+		}
+		if cfg.EnrollmentToken() != token {
+			t.Fatal("enrollment token was not resolved from the environment")
+		}
+	})
+
+	t.Run("custom refresh", func(t *testing.T) {
+		cfg, err := LoadConfig(writeConfigDoc(t, withEnrollment(t, envName, 120, token)))
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if cfg.EnrollmentRefreshSeconds() != 120 {
+			t.Fatalf("refresh = %d, want 120", cfg.EnrollmentRefreshSeconds())
+		}
+	})
+
+	t.Run("zero static agents allowed", func(t *testing.T) {
+		doc := withEnrollment(t, envName, 0, token)
+		doc["agents"] = []any{}
+		cfg, err := LoadConfig(writeConfigDoc(t, doc))
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if len(cfg.Agents) != 0 {
+			t.Fatalf("agents = %+v", cfg.Agents)
+		}
+	})
+
+	t.Run("zero static agents rejected when disabled", func(t *testing.T) {
+		setAgentTokenEnv(t)
+		doc := baseDevConfigDoc()
+		doc["agents"] = []any{}
+		if _, err := LoadConfig(writeConfigDoc(t, doc)); err == nil || !strings.Contains(err.Error(), "at least one") {
+			t.Fatalf("expected at-least-one error, got %v", err)
+		}
+	})
+
+	failures := []struct {
+		name     string
+		tokenEnv string
+		refresh  int
+		secret   string
+		wantSub  string
+	}{
+		{"missing token_env", "", 0, token, "token_env"},
+		{"missing env value", envName, 0, "", "not set"},
+		{"short secret", envName, 0, "too-short", "at least 32"},
+		{"refresh too small", envName, 59, token, "refresh_after_seconds"},
+		{"refresh too large", envName, 3601, token, "refresh_after_seconds"},
+	}
+	for _, tc := range failures {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfig(writeConfigDoc(t, withEnrollment(t, tc.tokenEnv, tc.refresh, tc.secret)))
+			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("error %v does not contain %q", err, tc.wantSub)
+			}
+		})
+	}
+
+	t.Run("disabled rejects token env", func(t *testing.T) {
+		setAgentTokenEnv(t)
+		doc := baseDevConfigDoc()
+		doc["enrollment"] = map[string]any{"enabled": false, "token_env": envName}
+		_, err := LoadConfig(writeConfigDoc(t, doc))
+		if err == nil || !strings.Contains(err.Error(), "must be empty") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("disabled rejects refresh", func(t *testing.T) {
+		setAgentTokenEnv(t)
+		doc := baseDevConfigDoc()
+		doc["enrollment"] = map[string]any{"enabled": false, "refresh_after_seconds": 300}
+		_, err := LoadConfig(writeConfigDoc(t, doc))
+		if err == nil || !strings.Contains(err.Error(), "must be empty") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("enrollment secret must not appear in the document", func(t *testing.T) {
+		setAgentTokenEnv(t)
+		doc := baseDevConfigDoc()
+		doc["enrollment"] = map[string]any{"enabled": true, "token": token}
+		_, err := LoadConfig(writeConfigDoc(t, doc))
+		if err == nil || !strings.Contains(err.Error(), "unknown field") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
 }

@@ -32,23 +32,25 @@ const (
 // Config defaults. These are applied by LoadConfig before validation so a
 // minimal document only has to set the mandatory fields.
 const (
-	defaultListen           = "127.0.0.1:8080"
-	defaultLogLevel         = "info"
-	defaultMaxHistoryJobs   = 200
-	defaultDNSTimeoutMS     = 4_000
-	defaultDNSMaxAddresses  = 16
-	defaultMaxHops          = 30
-	defaultMaxQueries       = 3
-	defaultMinExecutionMS   = model.MinExecutionTimeoutMS
-	defaultMaxExecutionMS   = 60_000
-	defaultMaxNodesPerJob   = 8
-	defaultMaxJobsPerMinute = 30
-	defaultMaxConcurrent    = 4
-	defaultMaxRawResultSize = 1 << 20 // 1 MiB per node, as documented in API.md.
-	defaultMaxResolves      = 120
-	defaultCFJWKSCacheTTL   = 300
-	defaultLocalSessionTTL  = 12 * 60 * 60
-	dispatchTimeoutMargin   = 10 * 1_000 // ms added to the requested trace timeout
+	defaultListen            = "127.0.0.1:8080"
+	defaultLogLevel          = "info"
+	defaultMaxHistoryJobs    = 200
+	defaultDNSTimeoutMS      = 4_000
+	defaultDNSMaxAddresses   = 16
+	defaultMaxHops           = 30
+	defaultMaxQueries        = 3
+	defaultMinExecutionMS    = model.MinExecutionTimeoutMS
+	defaultMaxExecutionMS    = 60_000
+	defaultMaxNodesPerJob    = 8
+	defaultMaxJobsPerMinute  = 30
+	defaultMaxConcurrent     = 4
+	defaultMaxRawResultSize  = 1 << 20 // 1 MiB per node, as documented in API.md.
+	defaultMaxResolves       = 120
+	defaultCFJWKSCacheTTL    = 300
+	defaultEnrollmentRefresh = 300
+	minEnrollmentTokenLen    = 32
+	defaultLocalSessionTTL   = 12 * 60 * 60
+	dispatchTimeoutMargin    = 10 * 1_000 // ms added to the requested trace timeout
 
 	maxConfigBytes = 1 << 20
 )
@@ -57,22 +59,33 @@ const (
 // the document itself: environment-variable names are configured and resolved
 // into unexported fields by LoadConfig.
 type Config struct {
-	Listen         string         `json:"listen"`
-	PublicOrigin   string         `json:"public_origin"`
-	Auth           AuthConfig     `json:"auth"`
-	Database       DatabaseConfig `json:"database"`
-	DNS            DNSConfig      `json:"dns"`
-	Limits         LimitsConfig   `json:"limits"`
-	Agents         []AgentConfig  `json:"agents"`
-	Security       SecurityConfig `json:"security"`
-	TrustedProxies []string       `json:"trusted_proxies"`
-	LogLevel       string         `json:"log_level"`
+	Listen         string           `json:"listen"`
+	PublicOrigin   string           `json:"public_origin"`
+	Auth           AuthConfig       `json:"auth"`
+	Database       DatabaseConfig   `json:"database"`
+	DNS            DNSConfig        `json:"dns"`
+	Limits         LimitsConfig     `json:"limits"`
+	Agents         []AgentConfig    `json:"agents"`
+	Security       SecurityConfig   `json:"security"`
+	Enrollment     EnrollmentConfig `json:"enrollment"`
+	TrustedProxies []string         `json:"trusted_proxies"`
+	LogLevel       string           `json:"log_level"`
 
 	// Derived, unexported state populated by LoadConfig.
 	publicOrigin     *url.URL
 	trustedPrefix    []netip.Prefix
 	targetPolicy     ipguard.Policy
 	allowedProtocols []model.Protocol
+	enrollmentToken  string
+}
+
+// EnrollmentConfig enables secure Agent auto-enrollment. When enabled, Agents
+// may register themselves with the shared enrollment token instead of being
+// listed in agents[]; the Controller then issues them a per-Agent trace token.
+type EnrollmentConfig struct {
+	Enabled             bool   `json:"enabled"`
+	TokenEnv            string `json:"token_env"`
+	RefreshAfterSeconds int    `json:"refresh_after_seconds"`
 }
 
 // SecurityConfig contains administrator-controlled target policy extensions.
@@ -273,6 +286,9 @@ func (c *Config) finalize(lookupEnv func(string) (string, bool)) error {
 		return err
 	}
 	if err := c.finalizeTrustedProxies(); err != nil {
+		return err
+	}
+	if err := c.finalizeEnrollment(lookupEnv); err != nil {
 		return err
 	}
 	if err := c.finalizeAgents(lookupEnv); err != nil {
@@ -649,8 +665,8 @@ func (c *Config) finalizeTrustedProxies() error {
 }
 
 func (c *Config) finalizeAgents(lookupEnv func(string) (string, bool)) error {
-	if len(c.Agents) == 0 {
-		return fmt.Errorf("config: at least one agents[] entry is required")
+	if len(c.Agents) == 0 && !c.Enrollment.Enabled {
+		return fmt.Errorf("config: at least one agents[] entry is required unless enrollment.enabled is true")
 	}
 	if len(c.Agents) > model.MaxBatchNodes {
 		return fmt.Errorf("config: at most %d agents may be configured", model.MaxBatchNodes)
@@ -704,8 +720,43 @@ func (c *Config) finalizeAgents(lookupEnv func(string) (string, bool)) error {
 			enabled++
 		}
 	}
-	if enabled == 0 {
-		return fmt.Errorf("config: at least one agent must be enabled")
+	if enabled == 0 && !c.Enrollment.Enabled {
+		return fmt.Errorf("config: at least one agent must be enabled unless enrollment.enabled is true")
+	}
+	return nil
+}
+
+// finalizeEnrollment validates the secure auto-enrollment section and resolves
+// the shared enrollment secret from the environment. The secret is never
+// serialized or logged.
+func (c *Config) finalizeEnrollment(lookupEnv func(string) (string, bool)) error {
+	e := &c.Enrollment
+	e.TokenEnv = strings.TrimSpace(e.TokenEnv)
+	if !e.Enabled {
+		if e.TokenEnv != "" || e.RefreshAfterSeconds != 0 {
+			return fmt.Errorf("config: enrollment.token_env and enrollment.refresh_after_seconds must be empty when enrollment.enabled is false")
+		}
+		return nil
+	}
+	if e.TokenEnv == "" {
+		return fmt.Errorf("config: enrollment.token_env is required when enrollment.enabled is true")
+	}
+	token, ok := lookupEnv(e.TokenEnv)
+	if !ok || token == "" {
+		return fmt.Errorf("config: enrollment.token_env %q is not set", e.TokenEnv)
+	}
+	if len(token) < minEnrollmentTokenLen {
+		return fmt.Errorf("config: enrollment.token_env %q must hold at least %d characters of high-entropy secret", e.TokenEnv, minEnrollmentTokenLen)
+	}
+	if len(token) > 4096 || strings.ContainsAny(token, "\r\n\x00") {
+		return fmt.Errorf("config: enrollment.token_env %q contains an invalid secret value", e.TokenEnv)
+	}
+	c.enrollmentToken = token
+	if e.RefreshAfterSeconds == 0 {
+		e.RefreshAfterSeconds = defaultEnrollmentRefresh
+	}
+	if e.RefreshAfterSeconds < 60 || e.RefreshAfterSeconds > 3600 {
+		return fmt.Errorf("config: enrollment.refresh_after_seconds must be between 60 and 3600")
 	}
 	return nil
 }
@@ -874,6 +925,16 @@ func (c *Config) IsProtocolAllowed(p model.Protocol) bool {
 	}
 	return false
 }
+
+// EnrollmentEnabled reports whether Agent auto-enrollment is enabled.
+func (c *Config) EnrollmentEnabled() bool { return c.Enrollment.Enabled }
+
+// EnrollmentToken returns the resolved shared enrollment secret. It is only
+// used by the enrollment endpoint and must never be logged or serialized.
+func (c *Config) EnrollmentToken() string { return c.enrollmentToken }
+
+// EnrollmentRefreshSeconds returns the advertised Agent re-enrollment cadence.
+func (c *Config) EnrollmentRefreshSeconds() int { return c.Enrollment.RefreshAfterSeconds }
 
 // Warnings returns static, non-sensitive warnings the UI shows in the session
 // response.

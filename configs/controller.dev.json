@@ -32,6 +32,9 @@
   "security": {
     "allowed_cidrs": []
   },
+  "enrollment": {
+    "enabled": false
+  },
   "agents": [
     {
       "id": "local-1",

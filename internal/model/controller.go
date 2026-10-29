@@ -62,17 +62,58 @@ type ResolveResponse struct {
 	Warnings          []string          `json:"warnings,omitempty"`
 }
 
-// NodeInfo is the administrative, non-secret description of an Agent.
-type NodeInfo struct {
-	ID               string   `json:"id"`
+// EnrollmentPath is the Controller endpoint Agents call to register
+// themselves. It is authenticated with a shared enrollment secret, never with
+// browser credentials, and it is the only way an Agent URL enters the system
+// without administrator configuration.
+const EnrollmentPath = "/api/v1/agents/enroll"
+
+// NodeSource identifies how a node entered the registry.
+type NodeSource string
+
+const (
+	NodeSourceStatic NodeSource = "static"
+	NodeSourceAuto   NodeSource = "auto"
+)
+
+// AgentEnrollRequest is sent by an Agent to the Controller on startup and on
+// periodic refresh. The Controller validates the advertised URL with the same
+// private/HTTPS transport rules used for static Agent configuration and returns
+// a per-Agent trace token.
+type AgentEnrollRequest struct {
+	SchemaVersion    string   `json:"schema_version"`
+	NodeID           string   `json:"node_id"`
 	Name             string   `json:"name"`
 	Location         string   `json:"location,omitempty"`
 	Provider         string   `json:"provider,omitempty"`
-	Enabled          bool     `json:"enabled"`
-	Health           string   `json:"health"` // "ok", "unreachable", "degraded", "unknown", "disabled"
-	LastSeen         string   `json:"last_seen,omitempty"`
+	URL              string   `json:"url"`
 	NextTraceVersion string   `json:"nexttrace_version,omitempty"`
-	Interfaces       []string `json:"interfaces,omitempty"`
+	Protocols        []string `json:"protocols,omitempty"`
+}
+
+// AgentEnrollResponse is the Controller's answer to a successful enrollment.
+// AgentToken is returned exactly once per enrollment/refresh; the Agent stores
+// it only in memory and uses it to authenticate Controller->Agent trace calls.
+type AgentEnrollResponse struct {
+	SchemaVersion string `json:"schema_version"`
+	NodeID        string `json:"node_id"`
+	AgentToken    string `json:"agent_token"`
+	TraceURL      string `json:"trace_url"`
+	RefreshAfterS int    `json:"refresh_after_seconds"`
+}
+
+// NodeInfo is the administrative, non-secret description of an Agent.
+type NodeInfo struct {
+	ID               string     `json:"id"`
+	Name             string     `json:"name"`
+	Location         string     `json:"location,omitempty"`
+	Provider         string     `json:"provider,omitempty"`
+	Enabled          bool       `json:"enabled"`
+	Health           string     `json:"health"` // "ok", "unreachable", "degraded", "unknown", "disabled"
+	LastSeen         string     `json:"last_seen,omitempty"`
+	NextTraceVersion string     `json:"nexttrace_version,omitempty"`
+	Interfaces       []string   `json:"interfaces,omitempty"`
+	Source           NodeSource `json:"source,omitempty"`
 }
 
 // NodeList is returned by GET /api/v1/nodes.

@@ -28,7 +28,8 @@ environment-variable *name* and resolved at startup:
 | Field | Meaning |
 | --- | --- |
 | `auth.local.password_hash_env` | name of the environment variable holding the PBKDF2 password hash |
-| `agents[].token_env` | name of the environment variable holding that Agent's bearer token |
+| `agents[].token_env` | name of the environment variable holding that static Agent's bearer token |
+| `enrollment.token_env` | name of the environment variable holding the shared auto-enrollment secret (>= 32 characters; required only when `enrollment.enabled`) |
 | `auth.cloudflare.csrf_secret_env` | optional; name of an environment variable holding a random secret used to derive stateless CSRF tokens (set it when running multiple Controller replicas) |
 
 If a referenced environment variable is missing or empty, startup fails. Tokens
@@ -134,8 +135,16 @@ SQLite runs with WAL, `busy_timeout=5000`, foreign keys on and a single pooled
 connection. A missing database is created; a corrupt or inaccessible database
 fails startup with a clear error rather than being replaced. The schema stores
 the full bounded `model.Job` in `jobs`, per-node results and bounded raw
-NextTrace output in `job_nodes`, and local sessions in `sessions`. History is
-trimmed to the newest `max_history_jobs` rows on every write.
+NextTrace output in `job_nodes`, local sessions in `sessions`, and
+auto-enrolled Agents in `registered_agents`. History is trimmed to the newest
+`max_history_jobs` rows on every write.
+
+`registered_agents` intentionally stores **raw per-Agent trace tokens** (not
+hashes): the Controller must present them when calling the Agent's
+`/v1/health` and `/v1/trace`. The database directory is created `0700` and the
+database file is restricted to `0600`; the file must live on a
+Controller-private volume. Browser session tokens are still stored only as
+SHA-256 hashes.
 
 `limits.max_history_jobs` is accepted as an alias for convenience; if both are
 set they must agree.
@@ -256,10 +265,54 @@ when creating a job:
   exports includes the selected `interface` (omitted when automatic), so a
   stored job never loses which source interface was used.
 
-### `agents` (array, required, 1..16 entries)
+### `enrollment` (object, optional)
 
-Administratively configured Agents. There is no API to add or change Agents at
-runtime, and the browser never receives Agent URLs or tokens.
+Secure Agent auto-enrollment. When enabled, Agents can register themselves with
+a shared enrollment secret and receive a per-Agent trace token, so the
+Controller configuration does not need to list every machine. The endpoint is
+`POST /api/v1/agents/enroll` and is **not** a browser endpoint: browser
+sessions, JWTs and CSRF do not apply to it; it authenticates only the shared
+enrollment secret.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `enrollment.enabled` | no | defaults to `false`; enables the enrollment endpoint and allows an empty static `agents[]` |
+| `enrollment.token_env` | when enabled | env var holding the shared enrollment secret; at least 32 characters, required when enabled, forbidden when disabled |
+| `enrollment.refresh_after_seconds` | no | re-enrollment cadence advertised to Agents, 60..3600, default 300; must be omitted when disabled |
+
+Behavior:
+
+- `Authorization: Bearer <enrollment-secret>` is required; the comparison is
+  constant time. Missing/wrong credentials return `401`. When enrollment is
+  disabled the path returns `404`, exactly like an unknown route.
+- Enrollment attempts are rate limited per client IP (30/min) and globally
+  (120/min) with `429 rate_limited` and `Retry-After`.
+- Bodies are strict JSON (unknown fields rejected) and capped at 8 KiB.
+  `schema_version` must be `tracecat.agent.v1`, `node_id` must match the shared
+  node-id pattern, display strings are sanitized and bounded, and the
+  advertised `url` obeys the same transport rules as static Agents: `https`
+  for hostnames and public IPs, plain `http` only for literal non-public
+  (loopback/private/CGNAT/Tailscale) addresses, never credentials, query,
+  fragment or a path. Advertised `protocols` must be known protocol names.
+- A `node_id` that belongs to a static `agents[]` entry is rejected with
+  `409 conflict`; static configuration always wins.
+- A successful enrollment returns the normalized `trace_url`, the node id, the
+  advertised `refresh_after_seconds`, and a freshly generated 32-byte
+  per-Agent trace token. Re-enrollment is idempotent and **rotates** the
+  token: the previous token immediately stops being used by the Controller.
+- Enrollment is persisted in `registered_agents` and reloaded at startup, so
+  self-registered nodes survive Controller restarts. Health polling, node
+  listing and job dispatch treat them exactly like static nodes.
+- `GET /api/v1/nodes` marks static nodes with `"source": "static"` and
+  self-enrolled nodes with `"source": "auto"`. Agent URLs and all tokens stay
+  server-side; only node metadata and health are exposed.
+- Nothing secret is logged: enrollment logs record the node id only.
+
+### `agents` (array, required unless `enrollment.enabled` is true, 1..16 entries)
+
+Administratively configured (static) Agents. Agents not listed here can
+self-register when `enrollment.enabled` is true; the browser never receives
+Agent URLs or tokens.
 
 | Field | Required | Meaning |
 | --- | --- | --- |

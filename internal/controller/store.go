@@ -67,6 +67,15 @@ func OpenStore(path string, maxHistoryJobs int) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("store: migrate database: %w", err)
 	}
+	if path != ":memory:" {
+		// Auto-enrolled Agents' per-node trace tokens are stored in this
+		// database because the Controller must present them when calling the
+		// Agent. The directory is 0700; tighten the file too.
+		if err := os.Chmod(path, 0o600); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("store: restrict database permissions: %w", err)
+		}
+	}
 	return s, nil
 }
 
@@ -124,6 +133,20 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_unix INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions (expires_unix);
+
+CREATE TABLE IF NOT EXISTS registered_agents (
+    node_id          TEXT PRIMARY KEY,
+    name             TEXT NOT NULL,
+    location         TEXT NOT NULL DEFAULT '',
+    provider         TEXT NOT NULL DEFAULT '',
+    url              TEXT NOT NULL,
+    agent_token      TEXT NOT NULL,
+    protocols        TEXT NOT NULL DEFAULT '[]',
+    nexttrace_version TEXT NOT NULL DEFAULT '',
+    created_unix     INTEGER NOT NULL,
+    updated_unix     INTEGER NOT NULL,
+    last_seen_unix   INTEGER NOT NULL DEFAULT 0
+);
 `
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -512,4 +535,141 @@ func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) (int64
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
+}
+
+// RegisteredAgent is an Agent that enrolled itself through the secure
+// enrollment endpoint. AgentToken is the per-Agent trace token the Controller
+// must present on /v1/health and /v1/trace calls; it is stored in the protected
+// Controller database (directory 0700, file 0600) because the Controller needs
+// the raw value, unlike local browser sessions which store only hashes.
+type RegisteredAgent struct {
+	NodeID           string
+	Name             string
+	Location         string
+	Provider         string
+	URL              string
+	AgentToken       string
+	Protocols        []string
+	NextTraceVersion string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	LastSeenAt       time.Time
+}
+
+// UpsertRegisteredAgent creates or updates an auto-enrolled Agent. The original
+// creation timestamp is preserved across re-enrollment/token rotation.
+func (s *Store) UpsertRegisteredAgent(ctx context.Context, agent RegisteredAgent) error {
+	if agent.NodeID == "" || agent.URL == "" || agent.AgentToken == "" {
+		return fmt.Errorf("store: incomplete registered agent record")
+	}
+	now := s.now().UTC()
+	created := agent.CreatedAt.UTC()
+	if created.IsZero() {
+		created = now
+	}
+	updated := agent.UpdatedAt.UTC()
+	if updated.IsZero() {
+		updated = now
+	}
+	lastSeen := agent.LastSeenAt.UTC().UnixNano()
+	protocols, err := json.Marshal(agent.Protocols)
+	if err != nil {
+		return fmt.Errorf("store: encode registered agent protocols: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+INSERT INTO registered_agents
+    (node_id, name, location, provider, url, agent_token, protocols, nexttrace_version, created_unix, updated_unix, last_seen_unix)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(node_id) DO UPDATE SET
+    name = excluded.name,
+    location = excluded.location,
+    provider = excluded.provider,
+    url = excluded.url,
+    agent_token = excluded.agent_token,
+    protocols = excluded.protocols,
+    nexttrace_version = excluded.nexttrace_version,
+    updated_unix = excluded.updated_unix,
+    last_seen_unix = excluded.last_seen_unix`,
+		agent.NodeID, agent.Name, agent.Location, agent.Provider, agent.URL, agent.AgentToken,
+		string(protocols), agent.NextTraceVersion, created.UnixNano(), updated.UnixNano(), lastSeen); err != nil {
+		return fmt.Errorf("store: upsert registered agent: %w", err)
+	}
+	return nil
+}
+
+// ListRegisteredAgents returns all auto-enrolled Agents in creation order.
+func (s *Store) ListRegisteredAgents(ctx context.Context) ([]RegisteredAgent, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT node_id, name, location, provider, url, agent_token, protocols, nexttrace_version, created_unix, updated_unix, last_seen_unix
+FROM registered_agents ORDER BY created_unix ASC, node_id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list registered agents: %w", err)
+	}
+	defer rows.Close()
+	out := make([]RegisteredAgent, 0)
+	for rows.Next() {
+		agent, err := scanRegisteredAgent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, agent)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate registered agents: %w", err)
+	}
+	return out, nil
+}
+
+// GetRegisteredAgent returns one auto-enrolled Agent.
+func (s *Store) GetRegisteredAgent(ctx context.Context, nodeID string) (*RegisteredAgent, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT node_id, name, location, provider, url, agent_token, protocols, nexttrace_version, created_unix, updated_unix, last_seen_unix
+FROM registered_agents WHERE node_id = ?`, nodeID)
+	agent, err := scanRegisteredAgent(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrStoreNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &agent, nil
+}
+
+// TouchRegisteredAgentLastSeen records a successful health check for an
+// auto-enrolled Agent.
+func (s *Store) TouchRegisteredAgentLastSeen(ctx context.Context, nodeID string, at time.Time) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE registered_agents SET last_seen_unix = ? WHERE node_id = ?`,
+		at.UTC().UnixNano(), nodeID); err != nil {
+		return fmt.Errorf("store: touch registered agent: %w", err)
+	}
+	return nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRegisteredAgent(row rowScanner) (RegisteredAgent, error) {
+	var (
+		agent                    RegisteredAgent
+		protocols                string
+		createdUnix, updatedUnix int64
+		lastSeenUnix             int64
+	)
+	if err := row.Scan(&agent.NodeID, &agent.Name, &agent.Location, &agent.Provider, &agent.URL,
+		&agent.AgentToken, &protocols, &agent.NextTraceVersion,
+		&createdUnix, &updatedUnix, &lastSeenUnix); err != nil {
+		return RegisteredAgent{}, err
+	}
+	if protocols != "" {
+		if err := json.Unmarshal([]byte(protocols), &agent.Protocols); err != nil {
+			return RegisteredAgent{}, fmt.Errorf("store: decode registered agent protocols: %w", err)
+		}
+	}
+	agent.CreatedAt = time.Unix(0, createdUnix).UTC()
+	agent.UpdatedAt = time.Unix(0, updatedUnix).UTC()
+	if lastSeenUnix > 0 {
+		agent.LastSeenAt = time.Unix(0, lastSeenUnix).UTC()
+	}
+	return agent, nil
 }

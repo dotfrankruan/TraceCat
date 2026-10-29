@@ -86,6 +86,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		time.Duration(cfg.DNS.TimeoutMS)*time.Millisecond, cfg.DNS.MaxAddresses)
 	agentClient := controller.NewAgentClient()
 	registry := controller.NewRegistry(cfg, agentClient, logger)
+	if err := registry.LoadRegisteredAgents(context.Background(), store); err != nil {
+		logger.Error("could not load auto-enrolled agents", "error", err)
+		_ = store.Close()
+		return 1
+	}
 	hub := controller.NewHub()
 	manager := controller.NewManager(cfg, store, registry, agentClient, hub, logger)
 	api, err := controller.NewAPI(cfg, store, resolver, registry, manager, logger)
@@ -129,7 +134,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		"listen", cfg.Listen,
 		"public_origin", cfg.PublicOrigin,
 		"auth_mode", cfg.Auth.Mode,
-		"agents", len(cfg.Agents),
+		"static_agents", len(cfg.Agents),
+		"enrollment_enabled", cfg.EnrollmentEnabled(),
 	)
 
 	select {

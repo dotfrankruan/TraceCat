@@ -26,15 +26,18 @@ const (
 
 // API is the browser-facing HTTP surface. It contains no Agent URLs or secrets.
 type API struct {
-	cfg            *Config
-	store          *Store
-	resolver       *ResolverService
-	registry       *Registry
-	manager        *Manager
-	auth           *Auth
-	logger         *slog.Logger
-	resolveLimiter *rateLimiter
-	sseHeartbeat   time.Duration
+	cfg                 *Config
+	store               *Store
+	resolver            *ResolverService
+	registry            *Registry
+	manager             *Manager
+	auth                *Auth
+	logger              *slog.Logger
+	resolveLimiter      *rateLimiter
+	enrollIPLimiter     *rateLimiter
+	enrollGlobalLimiter *rateLimiter
+	sseHeartbeat        time.Duration
+	now                 func() time.Time
 }
 
 // APIOption customizes the API service (tests inject auth/verifier and a fast
@@ -70,14 +73,17 @@ func NewAPI(cfg *Config, store *Store, resolver *ResolverService, registry *Regi
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	api := &API{
-		cfg:            cfg,
-		store:          store,
-		resolver:       resolver,
-		registry:       registry,
-		manager:        manager,
-		logger:         logger,
-		resolveLimiter: newRateLimiter(float64(cfg.Limits.MaxResolvesPerMinute)),
-		sseHeartbeat:   defaultSSEHeartbeat,
+		cfg:                 cfg,
+		store:               store,
+		resolver:            resolver,
+		registry:            registry,
+		manager:             manager,
+		logger:              logger,
+		resolveLimiter:      newRateLimiter(float64(cfg.Limits.MaxResolvesPerMinute)),
+		enrollIPLimiter:     newRateLimiter(enrollmentPerIPPerMinute),
+		enrollGlobalLimiter: newRateLimiter(enrollmentGlobalPerMinute),
+		sseHeartbeat:        defaultSSEHeartbeat,
+		now:                 time.Now,
 	}
 	for _, opt := range opts {
 		opt(api)
@@ -100,6 +106,7 @@ func (a *API) Auth() *Auth { return a.auth }
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", a.endpoint(a.handleHealthz, endpointOptions{methods: []string{http.MethodGet}}))
+	mux.HandleFunc(model.EnrollmentPath, a.endpoint(a.handleEnroll, endpointOptions{methods: []string{http.MethodPost}}))
 	mux.HandleFunc("/api/v1/session", a.endpoint(a.handleSession, endpointOptions{methods: []string{http.MethodGet}, auth: true}))
 	mux.HandleFunc("/api/v1/auth/login", a.localOnly(a.endpoint(a.handleLogin, endpointOptions{methods: []string{http.MethodPost}})))
 	mux.HandleFunc("/api/v1/auth/logout", a.localOnly(a.endpoint(a.handleLogout, endpointOptions{

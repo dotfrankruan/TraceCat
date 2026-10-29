@@ -132,6 +132,12 @@ func (f *fakeAgent) handleTrace(w http.ResponseWriter, r *http.Request) {
 	writeTestJSON(f.t, w, completedTraceResponse(req))
 }
 
+func (f *fakeAgent) setToken(token string) {
+	f.mu.Lock()
+	f.token = token
+	f.mu.Unlock()
+}
+
 func (f *fakeAgent) setInterfaces(interfaces []string) {
 	f.mu.Lock()
 	f.interfaces = append([]string(nil), interfaces...)
@@ -274,6 +280,29 @@ func withAgentClient(client *AgentClient) harnessOption {
 	return func(o *harnessOptions) { o.agentClient = client }
 }
 
+const (
+	testEnrollmentTokenEnv = "TRACECAT_TEST_ENROLLMENT_TOKEN"
+	testEnrollmentToken    = "test-enrollment-token-0123456789abcdef0123456789"
+)
+
+// withEnrollment enables or disables auto-enrollment in the harness config.
+// The enrollment secret lives only in an environment variable.
+func withEnrollment(t *testing.T, enabled bool) harnessOption {
+	t.Helper()
+	return withDocMutation(func(doc map[string]any) {
+		if !enabled {
+			doc["enrollment"] = map[string]any{"enabled": false}
+			return
+		}
+		t.Setenv(testEnrollmentTokenEnv, testEnrollmentToken)
+		doc["enrollment"] = map[string]any{
+			"enabled":               true,
+			"token_env":             testEnrollmentTokenEnv,
+			"refresh_after_seconds": 300,
+		}
+	})
+}
+
 func newHarness(t *testing.T, opts ...harnessOption) *harness {
 	t.Helper()
 	options := harnessOptions{mode: AuthModeDev}
@@ -314,6 +343,9 @@ func newHarness(t *testing.T, opts ...harnessOption) *harness {
 		agentClient = NewAgentClient()
 	}
 	registry := NewRegistry(cfg, agentClient, testLogger())
+	if err := registry.LoadRegisteredAgents(context.Background(), store); err != nil {
+		t.Fatalf("LoadRegisteredAgents: %v", err)
+	}
 	hub := NewHub()
 	manager := NewManager(cfg, store, registry, agentClient, hub, testLogger(), options.managerOpts...)
 	api, err := NewAPI(cfg, store, resolver, registry, manager, testLogger(), options.apiOpts...)
